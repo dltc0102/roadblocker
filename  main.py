@@ -1,14 +1,15 @@
 # Program goal: Find the top N fastest routes between two points
 
-import os, zipfile, fiona, json, requests, bs4, re
+import os, zipfile, fiona, json, requests, re, time
 from bs4 import BeautifulSoup
 import urllib.request
 import geopandas as gpd
 
-def get_latest_road_network(input_dirpath: str):
+def get_latest_road_network(input_dirpath: str) -> None:
     filename = "RdNet_IRNP.gdb"
     gdb_filepath = os.path.join(os.getcwd(), 'dataset', filename)
     if os.path.exists(gdb_filepath):
+        print("path already exists, dont need to redownload.")
         return
 
     download_url: str = "https://static.data.gov.hk/td/road-network-v2/RdNet_IRNP.gdb.zip"
@@ -48,7 +49,7 @@ def parse_gdb_files(input_dirpath: str) -> gpd.geodataframe.GeoDataFrame:
     print(f"Found {len(gdf)} road segments")
     return gdf
 
-def remove_filepath(filepath: str) -> str:
+def remove_filepath(filepath: str) -> None:
     if os.path.exists(filepath):
         os.remove(filepath)
 
@@ -81,16 +82,13 @@ def get_segment_data(gdf: gpd.geodataframe.GeoDataFrame) -> tuple:
 
     return gdf, all_street_data
 
-def get_expressway_limits():
+def get_expressway_limits(headers: dict) -> dict | None:
     url = "https://en.wikipedia.org/wiki/List_of_streets_and_roads_in_Hong_Kong"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
-    }
     res = requests.get(url, headers=headers)
     res.raise_for_status()
     if res.status_code != 200:
         print("url not 200.")
-        return {}
+        return None
 
     soup = BeautifulSoup(res.content, "html.parser")
     expressway_table = soup.select_one("table.wikitable.collapsible")
@@ -123,9 +121,13 @@ def get_expressway_limits():
 
     return expressway_limits
 
-def get_average_speed_by_street(gdf: gpd.geodataframe.GeoDataFrame):
+def get_average_speed_by_street(gdf: gpd.geodataframe.GeoDataFrame, headers: dict) -> gpd.geodataframe.GeoDataFrame | None:
     new_gdf = gdf.copy()
-    expressway_limits = get_expressway_limits()
+    expressway_limits = get_expressway_limits(headers)
+    if expressway_limits is None:
+        print("url did not work")
+        return None
+
     new_gdf["speed_limit"] = 50
     new_gdf["average_speed"] = 0.0
 
@@ -146,7 +148,7 @@ def get_average_speed_by_street(gdf: gpd.geodataframe.GeoDataFrame):
 
     return new_gdf
 
-def convert_to_serializable(data):
+def convert_to_serializable(data: dict) -> dict:
     if hasattr(data, 'wkt'):
         return data.wkt
     elif isinstance(data, dict):
@@ -156,10 +158,10 @@ def convert_to_serializable(data):
     else:
         return data
 
-def serialise_segment_data_to_json(giv_data):
+def serialise_segment_data_to_json(giv_data: dict) -> json:
     remove_filepath('parsed_data.json')
     print('removed filepath parsed_data.json')
-    serializable_data = convert_to_serializable(giv_data)
+    serializable_data: dict = convert_to_serializable(giv_data)
     with open('parsed_data.json', 'w', encoding='utf-8') as parsed_f:
         json.dump(serializable_data, parsed_f, indent=2, ensure_ascii=False)
     print('dump completed')
@@ -167,7 +169,7 @@ def serialise_segment_data_to_json(giv_data):
 def get_estimated_time(distance: float, ave_speed: float) -> float:
     return float(distance / ave_speed)
 
-def get_gdf_with_weight(gdf: gpd.geodataframe.GeoDataFrame):
+def get_gdf_with_weight(gdf: gpd.geodataframe.GeoDataFrame) -> gpd.geodataframe.GeoDataFrame:
     new_gdf = gdf.copy()
     new_gdf["weight"] = 0.0
 
@@ -179,6 +181,56 @@ def get_gdf_with_weight(gdf: gpd.geodataframe.GeoDataFrame):
 
     return new_gdf
 
+def percent_encode_address(giv_address: str) -> str:
+    encoded_address = requests.utils.quote(giv_address)
+    return encoded_address
+
+def address_lookup(headers: dict, request_address: str, lookup_num=200, tolerance=35, searching_mode=0) -> json:
+    lookup_url = "https://www.als.gov.hk/lookup"
+    encoded_address = percent_encode_address(request_address)
+
+    lookup_params = {
+        'q': encoded_address,
+        'n': lookup_num,
+        't': tolerance
+    }
+
+    if searching_mode != 0:
+        lookup_params['b'] = 1
+
+    res = requests.get(lookup_url, headers=headers, params=lookup_params)
+    if res.status_code != 200:
+        res.raise_for_status()
+        return None
+
+    lookup_json = res.json()
+    return lookup_json
+
+def osm_address_lookup(request_address: str) -> json:
+    NOMINATIM_HEADERS = {
+        "User-Agent": "Roadblocker/1.0 (daniellautc@gmail.com)"
+    }
+    url = "https://nominatim.openstreetmap.org/search"
+
+    params = {
+        'q': request_address,
+        'format': 'jsonv2',
+        'limit': 5,
+        'addressdetails': 1,
+        'country_code': 'cn',
+    }
+
+    response = requests.get(url, params=params, headers=NOMINATIM_HEADERS)
+    if response.status_code == 429:
+        print("Rate limited by Nominatim. Please wait before making another request.")
+        return None
+
+    if response.status_code != 200:
+        response.raise_for_status()
+        return None
+
+    data = response.json()
+    return data
 
 def get_fastest_routes(start_coords: tuple, end_coords: tuple, gdf: gpd.geodataframe.GeoDataFrame) -> list[dict, dict, dict]:
     route1 = {}
@@ -186,18 +238,91 @@ def get_fastest_routes(start_coords: tuple, end_coords: tuple, gdf: gpd.geodataf
     route3 = {}
     return [route1, route2, route3]
 
+def get_simplified_options(options: list | dict) -> list:
+    if isinstance(options, list):
+        simplified_options = []
+        for option in options:
+            option_details = {
+                "place_id": option["place_id"],
+                "display_name": option["display_name"],
+                "category": option["category"],
+                "type": option["type"],
+                "lat": option["lat"],
+                "lon": option["lon"],
+            }
+            simplified_options.append(option_details)
+        return simplified_options
+    elif isinstance(options, dict):
+        return {
+                "place_id": options["place_id"],
+                "display_name": options["display_name"],
+                "category": options["category"],
+                "type": options["type"],
+                "lat": options["lat"],
+                "lon": options["lon"],
+            }
+
+def get_chosen_option(options: list) -> dict:
+    simplified_options = get_simplified_options(options)
+    chosen_idx = 1
+    for idx, option in enumerate(simplified_options, 1):
+        print(f"{idx}. {option["display_name"]} ({option["place_id"]})")
+        for key, value in option.items():
+            if key != "display_name" and key != "place_id":
+                print(f" | {key}: {value}")
+        print()
+
+    print()
+    while True:
+        user_input = input(f"Which of the {len(simplified_options)} are you choosing? ")
+        if user_input.isdigit():
+            chosen_idx = int(user_input)
+            result = options[chosen_idx]
+            return options[chosen_idx]
+
+def get_coordinate_details(start_details: dict, end_details: dict):
+    return {
+        "start": {
+            "lat": start_details["lat"],
+            "lon": start_details["lon"],
+        },
+        "end": {
+            "lat": end_details["lat"],
+            "lon": end_details["lon"]
+        }
+    }
+
 def main():
+    USER_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+    }
     dataset_dirpath: str = get_dataset_dirpath()
+
     get_latest_road_network(input_dirpath=dataset_dirpath)
+
     parsed_gdf: gpd.geodataframe.GeoDataFrame = parse_gdb_files(input_dirpath=dataset_dirpath)
+
     gdf_after_getting_segment_data, segment_data = get_segment_data(parsed_gdf)
-    gdf_with_speed = get_average_speed_by_street(gdf_after_getting_segment_data)
+
+    gdf_with_speed = get_average_speed_by_street(gdf_after_getting_segment_data, headers=USER_HEADERS)
+
     gdf_with_weight = get_gdf_with_weight(gdf_with_speed)
+    print(gdf_with_weight)
 
-    c_start = (0, 0)
-    c_end = (100, 100)
-    fastest_routes = get_fastest_routes(c_start, c_end, gdf_with_weight)
+    # address look up
+    # start_address: str = "2 lung pak street"
+    # end_address: str = "89 pok fu lam road"
+    # osm_start_options: json = osm_address_lookup(request_address=start_address)
+    # osm_end_options: json = osm_address_lookup(request_address=end_address)
+    # osm_start: dict = get_chosen_option(osm_start_options)
+    # time.sleep(2)
+    # osm_end: dict = get_chosen_option(osm_end_options)
+    # coordinate_details: dict = get_coordinate_details(osm_start, osm_end)
 
-
+    # print(coordinate_details)
 if __name__ == "__main__":
     main()
