@@ -1,10 +1,15 @@
 # Program goal: Find the top N fastest routes between two points
 
 import os, zipfile, fiona, json, requests, re, time
+from pyproj import Transformer
 from bs4 import BeautifulSoup
 import urllib.request
 import geopandas as gpd
+from shapely import wkt
 
+"""
+GDF
+"""
 def get_latest_road_network(input_dirpath: str) -> None:
     filename = "RdNet_IRNP.gdb"
     gdb_filepath = os.path.join(os.getcwd(), 'dataset', filename)
@@ -25,7 +30,7 @@ def get_latest_road_network(input_dirpath: str) -> None:
 def get_dataset_dirpath() -> str:
     return os.path.join(os.getcwd(), 'dataset')
 
-def parse_gdb_files(input_dirpath: str) -> gpd.geodataframe.GeoDataFrame:
+def parse_gdb_files(input_dirpath: str, specified_name="CENTERLINE") -> gpd.geodataframe.GeoDataFrame:
     gdb_dirs: list = [file for file in os.listdir(input_dirpath) if file.endswith('.gdb')]
     if not gdb_dirs:
         raise FileNotFoundError("No GDB directory found in the dataset folder")
@@ -33,20 +38,14 @@ def parse_gdb_files(input_dirpath: str) -> gpd.geodataframe.GeoDataFrame:
     gdb_dir: str = gdb_dirs[0]
     gdb_filepath: str = os.path.join(input_dirpath, gdb_dir)
 
-    layers              : list= fiona.listlayers(gdb_filepath)
-    road_layer          : str = None
-    road_network_name   : str = "CENTERLINE"
+    layers          : list = fiona.listlayers(gdb_filepath)
+    layer_wanted    : str = None
     for layer in layers:
-        # print(f"layer name: {layer}")
-        if layer == road_network_name:
-            road_layer = layer
-            break
+        if layer == specified_name:
+            layer_wanted = layer
 
-    if not road_layer:
-        print("Road layer not found")
-
-    gdf: gpd.geodataframe.GeoDataFrame = gpd.read_file(gdb_filepath, layer=road_layer)
-    print(f"Found {len(gdf)} road segments")
+    gdf = gpd.read_file(gdb_filepath, layer=layer_wanted)
+    print(f"Found {len(gdf)} road segments for gdf")
     return gdf
 
 def remove_filepath(filepath: str) -> None:
@@ -148,24 +147,6 @@ def get_average_speed_by_street(gdf: gpd.geodataframe.GeoDataFrame, headers: dic
 
     return new_gdf
 
-def convert_to_serializable(data: dict) -> dict:
-    if hasattr(data, 'wkt'):
-        return data.wkt
-    elif isinstance(data, dict):
-        return {k: convert_to_serializable(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [convert_to_serializable(item) for item in data]
-    else:
-        return data
-
-def serialise_segment_data_to_json(giv_data: dict) -> json:
-    remove_filepath('parsed_data.json')
-    print('removed filepath parsed_data.json')
-    serializable_data: dict = convert_to_serializable(giv_data)
-    with open('parsed_data.json', 'w', encoding='utf-8') as parsed_f:
-        json.dump(serializable_data, parsed_f, indent=2, ensure_ascii=False)
-    print('dump completed')
-
 def get_estimated_time(distance: float, ave_speed: float) -> float:
     return float(distance / ave_speed)
 
@@ -181,30 +162,55 @@ def get_gdf_with_weight(gdf: gpd.geodataframe.GeoDataFrame) -> gpd.geodataframe.
 
     return new_gdf
 
-def percent_encode_address(giv_address: str) -> str:
-    encoded_address = requests.utils.quote(giv_address)
-    return encoded_address
+def convert_epsg_to_wgs84(gdf: gpd.geodataframe.GeoDataFrame):
+    # GDF CRS: EPSG:2326
+    # WGS84 CRS: EPSG:4326
 
-def address_lookup(headers: dict, request_address: str, lookup_num=200, tolerance=35, searching_mode=0) -> json:
-    lookup_url = "https://www.als.gov.hk/lookup"
-    encoded_address = percent_encode_address(request_address)
+    new_gdf = gdf.copy()
 
-    lookup_params = {
-        'q': encoded_address,
-        'n': lookup_num,
-        't': tolerance
-    }
+    coords_list = []
+    for idx, street in new_gdf.iterrows():
+        wkt_geometry = street["geometry"] # multilinestring
+        start_e, start_n = tuple((wkt_geometry.geoms[0]).coords[0])
+        crs_transformer = Transformer.from_crs("EPSG:2326", "EPSG:4326", always_xy=True)
+        lon, lat = crs_transformer.transform(start_e, start_n)
+        coords_list.append((lat, lon))
 
-    if searching_mode != 0:
-        lookup_params['b'] = 1
+    new_gdf["coords"] = coords_list
 
-    res = requests.get(lookup_url, headers=headers, params=lookup_params)
-    if res.status_code != 200:
-        res.raise_for_status()
-        return None
+    return new_gdf
 
-    lookup_json = res.json()
-    return lookup_json
+def get_nodes_from_gdf(gdf: gpd.geodataframe.GeoDataFrame) -> list:
+    new_gdf = gdf.copy()
+    gdf_nodes = []
+    class Node:
+        def __init__(self, ename, street_id, segment_length, speed_limit, ave_speed, coords, weight, geometry):
+            self.ename = ename,
+            self.street_id = street_id,
+            self.segment_length = segment_length
+            self.speed_limit = speed_limit,
+            self.ave_speed = ave_speed
+            self.coordinates = coords
+            self.weight = weight
+            self.geometry = geometry
+
+    for idx, street in new_gdf.iterrows():
+        street_ename = street["STREET_ENAME"]
+        street_id = street["ROUTE_ID"]
+        street_length = street["SHAPE_Length"]
+        street_speed_limit = street["speed_limit"]
+        street_ave_speed = street["average_speed"]
+        street_coords = street["coords"]
+        street_weight = street["weight"]
+        street_geometry = street["geometry"]
+        street_node = Node(street_ename, street_id, street_length, street_speed_limit, street_ave_speed, street_coords, street_weight, street_geometry)
+        gdf_nodes.append(street_node)
+
+    return gdf_nodes
+
+"""
+COORDINATE STUFF
+"""
 
 def osm_address_lookup(request_address: str) -> json:
     NOMINATIM_HEADERS = {
@@ -231,12 +237,6 @@ def osm_address_lookup(request_address: str) -> json:
 
     data = response.json()
     return data
-
-def get_fastest_routes(start_coords: tuple, end_coords: tuple, gdf: gpd.geodataframe.GeoDataFrame) -> list[dict, dict, dict]:
-    route1 = {}
-    route2 = {}
-    route3 = {}
-    return [route1, route2, route3]
 
 def get_simplified_options(options: list | dict) -> list:
     if isinstance(options, list):
@@ -282,17 +282,25 @@ def get_chosen_option(options: list) -> dict:
 
 def get_coordinate_details(start_details: dict, end_details: dict):
     return {
-        "start": {
-            "lat": start_details["lat"],
-            "lon": start_details["lon"],
-        },
-        "end": {
-            "lat": end_details["lat"],
-            "lon": end_details["lon"]
-        }
+        "start": (float(start_details["lat"]), float(start_details["lon"])),
+        "end": (float(end_details["lat"]), float(end_details["lon"])),
     }
 
+
+"""
+ALGO
+"""
+def get_fastest_routes(coordinate_details: dict, gdf: gpd.geodataframe.GeoDataFrame, top_n=3):
+    start_coords    : tuple[float, float] = coordinate_details["start"]
+    target_coords   : tuple[float, float] = coordinate_details["target"]
+    gdf_nodes       : list = get_nodes_from_gdf(gdf)
+
+"""
+MAIN
+"""
 def main():
+
+    # gdf stuff
     USER_HEADERS = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
         'Accept': 'application/json, text/plain, */*',
@@ -304,25 +312,38 @@ def main():
 
     get_latest_road_network(input_dirpath=dataset_dirpath)
 
-    parsed_gdf: gpd.geodataframe.GeoDataFrame = parse_gdb_files(input_dirpath=dataset_dirpath)
+    parsed_gdf_road = parse_gdb_files(input_dirpath=dataset_dirpath, specified_name="CENTERLINE")
+    parsed_gdf_traffic = parse_gdb_files(input_dirpath=dataset_dirpath, specified_name="TRAFFIC_FEATURES")
 
-    gdf_after_getting_segment_data, segment_data = get_segment_data(parsed_gdf)
+    gdf_after_getting_segment_data, segment_data = get_segment_data(parsed_gdf_road)
+    print("GDF: Segment length column added.")
 
     gdf_with_speed = get_average_speed_by_street(gdf_after_getting_segment_data, headers=USER_HEADERS)
+    print("GDF: Speed column added.")
 
     gdf_with_weight = get_gdf_with_weight(gdf_with_speed)
-    print(gdf_with_weight)
+    print("GDF: Heuristics column added.")
+
+    gdf_with_wgs84 = convert_epsg_to_wgs84(gdf_with_weight)
+    print("GDF: EPSG:2326 converted to WGS84.")
 
     # address look up
-    # start_address: str = "2 lung pak street"
-    # end_address: str = "89 pok fu lam road"
+    start_address: str = "2 lung pak street"
+    end_address: str = "89 pok fu lam road"
     # osm_start_options: json = osm_address_lookup(request_address=start_address)
     # osm_end_options: json = osm_address_lookup(request_address=end_address)
     # osm_start: dict = get_chosen_option(osm_start_options)
     # time.sleep(2)
     # osm_end: dict = get_chosen_option(osm_end_options)
     # coordinate_details: dict = get_coordinate_details(osm_start, osm_end)
-
     # print(coordinate_details)
+
+    coordinate_details = {
+        "start": (22.3642146, 114.1794265),
+        "target": (22.2853336, 114.1330190)
+    }
+    # algorithm
+    top_n_routes = get_fastest_routes(coordinate_details, gdf_with_wgs84)
+
 if __name__ == "__main__":
     main()
