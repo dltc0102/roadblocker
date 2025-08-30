@@ -12,6 +12,15 @@ import heapq
 
 # visualizer
 
+""" UTILS """
+def convert_mls_crs(mls_str: str) -> list[tuple[float, float]]:
+    crs_transformer = Transformer.from_crs("EPSG:2326", "EPSG:4326", always_xy=True)
+    if mls_str.geom_type == 'MultiLineString':
+        eing, ning = tuple((mls_str.geoms[0]).coords[0])
+
+    if eing is not None and ning is not None:
+        lon, lat = crs_transformer.transform(eing, ning)
+        return (lat, lon)
 
 """
 GDF
@@ -261,7 +270,7 @@ def parse_traffic_light_locations(gdf: gpd.geodataframe.GeoDataFrame) -> list[Tr
 COORDINATE STUFF
 """
 
-def osm_address_lookup(request_address: str) -> json:
+def osm_address_lookup(request_address: str):
     NOMINATIM_HEADERS = {
         "User-Agent": "Roadblocker/1.0 (daniellautc@gmail.com)"
     }
@@ -272,7 +281,7 @@ def osm_address_lookup(request_address: str) -> json:
         'format': 'jsonv2',
         'limit': 5,
         'addressdetails': 1,
-        'country_code': 'cn',
+        'country_code': 'cn'
     }
 
     response = requests.get(url, params=params, headers=NOMINATIM_HEADERS)
@@ -284,8 +293,7 @@ def osm_address_lookup(request_address: str) -> json:
         response.raise_for_status()
         return None
 
-    data = response.json()
-    return data
+    return response.json()
 
 def get_simplified_options(options: list | dict) -> list:
     if isinstance(options, list):
@@ -510,11 +518,59 @@ def get_top_n_routes(coordinate_details: dict, node_kdtree: NodeKDTree, top_n=3)
     routes.sort(key=lambda x: x['total_time_hours'])
     return routes[:top_n]
 
+def get_lang_name(name_str: str) -> list[str, str]:
+    chinese_pattern = r'[\u4e00-\u9fff]+'
+    chinese_matches = re.findall(chinese_pattern, name_str)
+    chinese_name = ' '.join(chinese_matches) if chinese_matches else ""
+    english_name = re.sub(chinese_pattern, '', name_str).strip()
+
+    return chinese_name, english_name
+
+def reverse_weird_streets(gdf: gpd.geodataframe.GeoDataFrame) -> gpd.geodataframe.GeoDataFrame:
+    new_gdf = gdf.copy()
+    for idx, street in new_gdf.iterrows():
+        if street["STREET_ENAME"] == '-99':
+            street_geometry = street["geometry"]
+            street_start_point = convert_mls_crs(street_geometry)
+            street_reverse_result = osm_reverse_lookup(street_start_point)
+            if street_reverse_result:
+                new_name = street_reverse_result["name"]
+                new_ename, new_cname = get_lang_name(new_name)
+                new_gdf.at[idx, "STREET_ENAME"] = new_ename
+                new_gdf.at[idx, "STREET_CNAME"] = new_cname
+    print("GDF: Reversed weird -99 streets.")
+    return new_gdf
+
 
 """
 VISUALIZER
 """
 
+def osm_reverse_lookup(coord_tuple: tuple) -> json:
+    NOMINATIM_HEADERS = {
+        "User-Agent": "Roadblocker/1.0 (daniellautc@gmail.com)"
+    }
+
+    url = "https://nominatim.openstreetmap.org/reverse"
+
+    params = {
+        'format': 'jsonv2',
+        'lat': coord_tuple[0],
+        'lon': coord_tuple[1],
+        'zoom': 18,
+        'addressdetails': 1
+    }
+
+    response = requests.get(url, params=params, headers=NOMINATIM_HEADERS)
+    if response.status_code == 429:
+        print("Rate limited by Nominatim. Please wait before making another request.")
+        return None
+
+    if response.status_code != 200:
+        response.raise_for_status()
+        return None
+
+    return response.json()
 
 
 """
@@ -535,30 +591,37 @@ def main():
     get_latest_road_network(input_dirpath=dataset_dirpath)
 
     parsed_gdf_road = parse_gdb_files(input_dirpath=dataset_dirpath, specified_name="CENTERLINE")
-    parsed_gdf_traffic = parse_gdb_files(input_dirpath=dataset_dirpath, specified_name="TRAFFIC_FEATURES")
+    sorted_gdf_road = reverse_weird_streets(parsed_gdf_road)
 
-    gdf_traffic_with_wgs84 = convert_epsg_to_wgs84(parsed_gdf_traffic)
-    traffic_light_locations: list = parse_traffic_light_locations(gdf_traffic_with_wgs84)
+    for idx, street in sorted_gdf_road.iterrows():
+        if street["STREET_ENAME"] == '-99':
+            print(street)
+
+
+    # parsed_gdf_traffic = parse_gdb_files(input_dirpath=dataset_dirpath, specified_name="TRAFFIC_FEATURES")
+
+    # gdf_traffic_with_wgs84 = convert_epsg_to_wgs84(parsed_gdf_traffic)
+    # traffic_light_locations: list = parse_traffic_light_locations(gdf_traffic_with_wgs84)
     # for tl in traffic_light_locations:
     #     print(tl.node_id, tl.coordinates)
 
-    gdf_after_getting_segment_data, segment_data = get_segment_data(parsed_gdf_road)
+    # gdf_after_getting_segment_data, segment_data = get_segment_data(parsed_gdf_road)
 
-    gdf_with_speed = get_average_speed_by_street(gdf_after_getting_segment_data, headers=USER_HEADERS)
+    # gdf_with_speed = get_average_speed_by_street(gdf_after_getting_segment_data, headers=USER_HEADERS)
 
-    gdf_with_weight = get_gdf_with_weight(gdf_with_speed)
+    # gdf_with_weight = get_gdf_with_weight(gdf_with_speed)
 
-    gdf_with_wgs84 = convert_epsg_to_wgs84(gdf_with_weight)
+    # gdf_with_wgs84 = convert_epsg_to_wgs84(gdf_with_weight)
 
-    nodes_from_gdf: list[Node] = get_nodes_from_gdf(gdf_with_wgs84)
-    nodes_from_gdf = build_neighbors_based_on_geometry(gdf_with_wgs84, nodes_from_gdf)
-    node_kdtree = NodeKDTree(nodes_from_gdf)
+    # nodes_from_gdf: list[Node] = get_nodes_from_gdf(gdf_with_wgs84)
+    # nodes_from_gdf = build_neighbors_based_on_geometry(gdf_with_wgs84, nodes_from_gdf)
+    # node_kdtree = NodeKDTree(nodes_from_gdf)
 
     # address look up
     start_address: str = "2 lung pak street"
     end_address: str = "89 pok fu lam road"
-    osm_start_options: json = osm_address_lookup(request_address=start_address)
-    osm_end_options: json = osm_address_lookup(request_address=end_address)
+    # osm_start_options: json = osm_address_lookup(request_address=start_address)
+    # osm_end_options: json = osm_address_lookup(request_address=end_address)
     # osm_start: dict = get_chosen_option(osm_start_options)
     # time.sleep(2)
     # osm_end: dict = get_chosen_option(osm_end_options)
@@ -571,16 +634,19 @@ def main():
     }
 
     # algorithm
-    top_n_routes = get_top_n_routes(coordinate_details, node_kdtree, top_n=3)
-    for idx, route in enumerate(top_n_routes, 1):
-        print(f"\nRoute #{idx}:")
-        print(f"Total time: {route['total_time_hours'] * 60:.2f} minutes")
-        print(f"Number of segments: {len(route['path'])}")
-        print("Segments:")
+    # top_n_routes = get_top_n_routes(coordinate_details, node_kdtree, top_n=3)
+    # for idx, route in enumerate(top_n_routes, 1):
+    #     print(f"\nRoute #{idx}:")
+    #     print(f"Total time: {route['total_time_hours'] * 60:.2f} minutes")
+    #     print(f"Number of segments: {len(route['path'])}")
+    #     print("Segments:")
 
-        for jdx, node in enumerate(route['path'], 1):
-            lat, lon = node.coordinates
-            print(f"  {jdx}. {node.ename} (ID: {node.street_id}) - Lat: {lat:.6f}, Lon: {lon:.6f}")
+    #     for jdx, node in enumerate(route['path'], 1):
+    #         lat, lon = node.coordinates
+    #         print(f"  {jdx}. {node.ename} (ID: {node.street_id}) - Lat: {lat:.6f}, Lon: {lon:.6f}")
+
+    # figure out -99
+
 
 if __name__ == "__main__":
     main()
