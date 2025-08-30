@@ -392,18 +392,41 @@ def combined_heuristics(node: Node, target_coords: tuple[float, float]) -> float
     geo_distance_km = haversine_distance(node, target_node)
     return geo_distance_km / max_speed_kmh
 
+def build_neighbors(nodes: list[Node], max_distance_km=0.02):
+    coords_array = np.array([node.coordinates for node in nodes])
+    temp_kdtree = cKDTree(coords_array)
+
+    total_neighbors = 0
+    for idx, node in enumerate(nodes):
+        indices = temp_kdtree.query_ball_point(node.coordinates, max_distance_km)
+        for jdx in indices:
+            if jdx != idx:
+                neighbor_node = nodes[jdx]
+                distance_km = haversine_distance(node, neighbor_node)
+                if distance_km <= max_distance_km and neighbor_node not in node.neighbors:
+                    node.neighbors.append(neighbor_node)
+                    total_neighbors += 1
+
+    print(f"Built {total_neighbors} neighbor relationships for {len(nodes)} nodes")
+    nodes_with_neighbors = sum(1 for node in nodes if node.neighbors)
+    print(f"{nodes_with_neighbors} nodes have at least one neighbor")
+
+    return nodes
+
 def algo_a_star(start_node: Node, end_coords: tuple[float, float]) -> tuple:
     open_set = []
     heapq.heappush(open_set, (0, start_node))
     came_from = {start_node: None}
     g_score = {start_node: 0}
     f_score = {start_node: combined_heuristics(start_node, end_coords)}
-    open_set_hash = {start_node}
+    closed_set = set()
 
     while open_set:
         current_f, current = heapq.heappop(open_set)
-        open_set_hash.remove(current)
+        if current in closed_set: # if visited
+            continue
 
+        closed_set.add(current) # add already visited
         target_node = Node("TARGET", "TARGET", end_coords, 0)
         if haversine_distance(current, target_node) < 0.01:
             path = []
@@ -414,46 +437,27 @@ def algo_a_star(start_node: Node, end_coords: tuple[float, float]) -> tuple:
             return path[::-1], total_time
 
         for neighbor in current.neighbors:
-            temp_g_score = g_score[current] + current.weight
+            # if already visited, skip
+            if neighbor in closed_set:
+                continue
 
+            edge_distance_km = haversine_distance(current, neighbor)
+            edge_time = edge_distance_km / (current.average_speed if hasattr(current, 'average_speed') else 50)
+            temp_g_score = g_score[current] + edge_time
             if neighbor not in g_score or temp_g_score < g_score[neighbor]:
                 came_from[neighbor] = current
                 g_score[neighbor] = temp_g_score
                 f_score[neighbor] = temp_g_score + combined_heuristics(neighbor, end_coords)
-
-                if neighbor not in open_set_hash:
-                    heapq.heappush(open_set, (f_score[neighbor], neighbor))
-                    open_set_hash.add(neighbor)
+                heapq.heappush(open_set, (f_score[neighbor], neighbor))
 
     return None, float('inf')
-
-def build_neighbors(nodes: list[Node], max_distance_km=0.02):
-    coords_array = np.array([node.coordinates for node in nodes])
-    temp_kdtree = cKDTree(coords_array)
-
-    total_neighbors = 0
-    for idx, node in enumerate(nodes):
-        indices = temp_kdtree.query_ball_point(node.coordinates, max_distance_km)
-
-        for jdx in indices:
-            if jdx != idx:
-                neighbor_node = nodes[jdx]
-                node.neighbors.append(neighbor_node)
-                total_neighbors += 1
-
-
-    nodes_with_neighbors = sum(1 for node in nodes if node.neighbors)
-
-    return nodes
 
 def get_top_n_routes(coordinate_details: dict, node_kdtree: NodeKDTree, top_n=3):
     start_coords = coordinate_details["start"]
     end_coords = coordinate_details["end"]
-
     nearby_start_nodes, start_distances = node_kdtree.find_nearest_neighbors(start_coords, k=top_n)
 
     routes = []
-
     for start_node in nearby_start_nodes:
         path, total_time = algo_a_star(start_node, end_coords)
         if path:
