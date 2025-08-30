@@ -155,9 +155,6 @@ def get_average_speed_by_street(gdf: gpd.geodataframe.GeoDataFrame, headers: dic
     print("GDF: Speed column added.")
     return new_gdf
 
-def get_estimated_time(distance: float, ave_speed: float) -> float:
-    return float(distance / ave_speed)
-
 def get_gdf_with_weight(gdf: gpd.geodataframe.GeoDataFrame) -> gpd.geodataframe.GeoDataFrame:
     new_gdf = gdf.copy()
     new_gdf["weight"] = 0.0
@@ -165,10 +162,10 @@ def get_gdf_with_weight(gdf: gpd.geodataframe.GeoDataFrame) -> gpd.geodataframe.
     for idx, street in new_gdf.iterrows():
         street_ave_speed = float(street["average_speed"]) # km/hr
         street_length_km = float(street["SHAPE_Length"] / 1000)
-        weight: float = get_estimated_time(distance=street_length_km, ave_speed=street_ave_speed)
+        weight: float = street_length_km / street_ave_speed
         new_gdf.at[idx, "weight"] = weight
 
-    print("GDF: Node's Weight column added.")
+    print("GDF: Node's Weight column added. (time in hours)")
     return new_gdf
 
 def convert_epsg_to_wgs84(gdf: gpd.geodataframe.GeoDataFrame):
@@ -392,64 +389,93 @@ def combined_heuristics(node: Node, target_coords: tuple[float, float]) -> float
     geo_distance_km = haversine_distance(node, target_node)
     return geo_distance_km / max_speed_kmh
 
-def build_neighbors(nodes: list[Node], max_distance_km=0.02):
-    coords_array = np.array([node.coordinates for node in nodes])
-    temp_kdtree = cKDTree(coords_array)
+def build_neighbors_based_on_geometry(gdf: gpd.geodataframe.GeoDataFrame, nodes: list[Node], distance_threshold=1.0) -> list[Node]:
+    """Build neighbors based on actual geometric connections between road segments"""
 
+    # Create a spatial index for faster intersection checks
+    spatial_index = gdf.sindex
     total_neighbors = 0
-    for idx, node in enumerate(nodes):
-        indices = temp_kdtree.query_ball_point(node.coordinates, max_distance_km)
-        for jdx in indices:
-            if jdx != idx:
-                neighbor_node = nodes[jdx]
-                distance_km = haversine_distance(node, neighbor_node)
-                if distance_km <= max_distance_km and neighbor_node not in node.neighbors:
-                    node.neighbors.append(neighbor_node)
+
+    for idx, (_, row) in enumerate(gdf.iterrows()):
+        current_geom = row["geometry"]
+        current_node = nodes[idx]
+
+        # Use a buffer to find nearby segments (more efficient than checking all)
+        buffered_geom = current_geom.buffer(distance_threshold)  # 1 meter buffer
+        possible_matches_index = list(spatial_index.intersection(buffered_geom.bounds))
+
+        for match_idx in possible_matches_index:
+            if match_idx == idx:  # Skip self
+                continue
+
+            match_row = gdf.iloc[match_idx]
+            match_geom = match_row["geometry"]
+            match_node = nodes[match_idx]
+
+            # Check if geometries intersect or are close
+            if (current_geom.intersects(match_geom) or
+                current_geom.distance(match_geom) < distance_threshold):
+                if match_node not in current_node.neighbors:
+                    current_node.neighbors.append(match_node)
                     total_neighbors += 1
 
-    print(f"Built {total_neighbors} neighbor relationships for {len(nodes)} nodes")
+    print(f"Built {total_neighbors} geometric neighbor relationships for {len(nodes)} nodes")
     nodes_with_neighbors = sum(1 for node in nodes if node.neighbors)
-    print(f"{nodes_with_neighbors} nodes have at least one neighbor")
+    print(f"{nodes_with_neighbors} nodes have at least one geometric neighbor")
 
     return nodes
 
-def algo_a_star(start_node: Node, end_coords: tuple[float, float]) -> tuple:
+def algo_a_star(start_node: Node, end_coords: tuple[float, float], timeout_seconds=10) -> tuple:
+    start_time = time.time()
     open_set = []
     heapq.heappush(open_set, (0, start_node))
-    came_from = {start_node: None}
-    g_score = {start_node: 0}
-    f_score = {start_node: combined_heuristics(start_node, end_coords)}
+    came_from   : dict[Node, None] = {start_node: None}
+    g_score     : dict[Node, float] = {start_node: 0}
+    f_score     : dict[Node, float] = {start_node: combined_heuristics(start_node, end_coords)}
     closed_set = set()
+    iterations = 0
 
     while open_set:
+        iterations += 1
+        # Timeout check
+        if time.time() - start_time > timeout_seconds:
+            print(f"  A* timeout after {iterations} iterations")
+            return None, float('inf')
+
         current_f, current = heapq.heappop(open_set)
-        if current in closed_set: # if visited
+        if current in closed_set:
             continue
 
-        closed_set.add(current) # add already visited
-        target_node = Node("TARGET", "TARGET", end_coords, 0)
-        if haversine_distance(current, target_node) < 0.01:
+        closed_set.add(current)
+        target_node: Node = Node("TARGET", "TARGET", end_coords, 0)
+
+        # Check distance to target
+        distance_to_target = haversine_distance(current, target_node)
+        if distance_to_target < 0.1:  # 100 meters
             path = []
-            total_time = g_score[current]
+            total_time: float = g_score[current]
             while current:
                 path.append(current)
                 current = came_from[current]
+            print(f"  Found route! Distance to target: {distance_to_target:.3f} km, Iterations: {iterations}")
             return path[::-1], total_time
 
+        # Progress tracking
+        if iterations % 1000 == 0:
+            print(f"  Iteration {iterations}: Open set: {len(open_set)}, Closed set: {len(closed_set)}")
+
         for neighbor in current.neighbors:
-            # if already visited, skip
             if neighbor in closed_set:
                 continue
 
-            edge_distance_km = haversine_distance(current, neighbor)
-            edge_time = edge_distance_km / (current.average_speed if hasattr(current, 'average_speed') else 50)
-            temp_g_score = g_score[current] + edge_time
+            temp_g_score: float = g_score[current] + neighbor.weight
             if neighbor not in g_score or temp_g_score < g_score[neighbor]:
                 came_from[neighbor] = current
                 g_score[neighbor] = temp_g_score
                 f_score[neighbor] = temp_g_score + combined_heuristics(neighbor, end_coords)
                 heapq.heappush(open_set, (f_score[neighbor], neighbor))
 
+    print(f"  No path found after {iterations} iterations")
     return None, float('inf')
 
 def get_top_n_routes(coordinate_details: dict, node_kdtree: NodeKDTree, top_n=3):
@@ -457,16 +483,29 @@ def get_top_n_routes(coordinate_details: dict, node_kdtree: NodeKDTree, top_n=3)
     end_coords = coordinate_details["end"]
     nearby_start_nodes, start_distances = node_kdtree.find_nearest_neighbors(start_coords, k=top_n)
 
+    print(f"Found {len(nearby_start_nodes)} start nodes near {start_coords}")
+    for i, (node, dist) in enumerate(zip(nearby_start_nodes, start_distances)):
+        print(f"  Start node {i+1}: {node.ename} (ID: {node.street_id}) - Distance: {dist:.6f} km")
+        print(f"    This node has {len(node.neighbors)} neighbors")
+        if node.neighbors:
+            for neighbor in node.neighbors[:3]:  # Show first 3 neighbors
+                neighbor_dist = haversine_distance(node, neighbor)
+                print(f"      Neighbor: {neighbor.ename} - Distance: {neighbor_dist:.6f} km")
+
     routes = []
-    for start_node in nearby_start_nodes:
-        path, total_time = algo_a_star(start_node, end_coords)
+    for i, start_node in enumerate(nearby_start_nodes):
+        print(f"Running A* from start node {i+1}...")
+        path, total_time = algo_a_star(start_node, end_coords, timeout_seconds=15)
         if path:
+            print(f"  Found route with {len(path)} segments, time: {total_time*60:.2f} min")
             routes.append({
                 'path': path,
                 'total_time_hours': total_time,
                 'start_node': start_node,
                 'end_coords': end_coords
             })
+        else:
+            print("  No route found from this start node")
 
     routes.sort(key=lambda x: x['total_time_hours'])
     return routes[:top_n]
@@ -512,7 +551,7 @@ def main():
     gdf_with_wgs84 = convert_epsg_to_wgs84(gdf_with_weight)
 
     nodes_from_gdf: list[Node] = get_nodes_from_gdf(gdf_with_wgs84)
-    nodes_from_gdf = build_neighbors(nodes_from_gdf, max_distance_km=0.02)
+    nodes_from_gdf = build_neighbors_based_on_geometry(gdf_with_wgs84, nodes_from_gdf)
     node_kdtree = NodeKDTree(nodes_from_gdf)
 
     # address look up
@@ -533,15 +572,15 @@ def main():
 
     # algorithm
     top_n_routes = get_top_n_routes(coordinate_details, node_kdtree, top_n=3)
-    for i, route in enumerate(top_n_routes, 1):
-        print(f"\nRoute #{i}:")
+    for idx, route in enumerate(top_n_routes, 1):
+        print(f"\nRoute #{idx}:")
         print(f"Total time: {route['total_time_hours'] * 60:.2f} minutes")
         print(f"Number of segments: {len(route['path'])}")
         print("Segments:")
 
-        for j, node in enumerate(route['path'], 1):
+        for jdx, node in enumerate(route['path'], 1):
             lat, lon = node.coordinates
-            print(f"  {j}. {node.ename} (ID: {node.street_id}) - Lat: {lat:.6f}, Lon: {lon:.6f}")
+            print(f"  {jdx}. {node.ename} (ID: {node.street_id}) - Lat: {lat:.6f}, Lon: {lon:.6f}")
 
 if __name__ == "__main__":
     main()
