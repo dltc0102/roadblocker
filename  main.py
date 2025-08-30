@@ -85,6 +85,7 @@ def get_segment_data(gdf: gpd.geodataframe.GeoDataFrame) -> tuple:
                     "segment_number": idx
                 }
 
+    print("GDF: Segment length column added.")
     return gdf, all_street_data
 
 def get_expressway_limits(headers: dict) -> dict | None:
@@ -151,6 +152,7 @@ def get_average_speed_by_street(gdf: gpd.geodataframe.GeoDataFrame, headers: dic
 
         new_gdf.at[idx, 'average_speed'] = 0.9 * new_gdf.at[idx, 'speed_limit']
 
+    print("GDF: Speed column added.")
     return new_gdf
 
 def get_estimated_time(distance: float, ave_speed: float) -> float:
@@ -166,6 +168,7 @@ def get_gdf_with_weight(gdf: gpd.geodataframe.GeoDataFrame) -> gpd.geodataframe.
         weight: float = get_estimated_time(distance=street_length_km, ave_speed=street_ave_speed)
         new_gdf.at[idx, "weight"] = weight
 
+    print("GDF: Node's Weight column added.")
     return new_gdf
 
 def convert_epsg_to_wgs84(gdf: gpd.geodataframe.GeoDataFrame):
@@ -196,6 +199,7 @@ def convert_epsg_to_wgs84(gdf: gpd.geodataframe.GeoDataFrame):
             coords_list.append(None)
 
     new_gdf["coords"] = coords_list
+    print(f"GDF: EPSG:2326 converted to WGS84 for gdf.")
     return new_gdf
 
 class TrafficLightNode:
@@ -208,15 +212,24 @@ class TrafficLightNode:
         print(f"{self.node_id} ({self.node_type}): {self.coordinates}")
 
 class Node:
-    def __init__(self, ename, street_id, coords, heuristic):
+    def __init__(self, ename, street_id, coords, weight):
         self.ename = ename
         self.street_id = street_id
         self.coordinates = coords # [lat, lon]
-        self.heuristic = heuristic
-        self.neighbours = []
+        self.weight = weight
+        self.neighbors = []
 
     def _print(self):
         print(f"{self.ename} ({self.street_id}): {self.coordinates}")
+
+    def __lt__(self, other):
+        return self.street_id < other.street_id
+
+    def __eq__(self, other):
+        return self.street_id == other.street_id
+
+    def __hash__(self):
+        return hash((self.ename, self.street_id, tuple(self.coordinates)))
 
 def get_nodes_from_gdf(gdf: gpd.geodataframe.GeoDataFrame) -> list:
     new_gdf = gdf.copy()
@@ -230,6 +243,7 @@ def get_nodes_from_gdf(gdf: gpd.geodataframe.GeoDataFrame) -> list:
         street_node = Node(street_ename, street_id, street_coords, street_weight)
         gdf_nodes.append(street_node)
 
+    print("GDF: Retrieved all nodes from gdf.")
     return gdf_nodes
 
 def parse_traffic_light_locations(gdf: gpd.geodataframe.GeoDataFrame) -> list[TrafficLightNode]:
@@ -339,14 +353,15 @@ class NodeKDTree:
 
     def build_tree(self, nodes: list[Node]):
         self.nodes = nodes
-        self.coords_array = np.array([node.coordinates for node in nodes])  # Fixed: removed extra bracket
+        self.coords_array = np.array([node.coordinates for node in nodes])
         self.tree = cKDTree(self.coords_array)
+        print("cKDTree: Built nodes into kdtree.")
 
     def add_node(self, node: Node):
         self.nodes.append(node)
         self.build_tree(self.nodes)
 
-    def find_nearest_neighbours(self, coord: list[float], k: int = 1):
+    def find_nearest_neighbors(self, coord: list[float], k: int = 1):
         if not self.tree:
             raise ValueError("cKDTree not built yet.")
         distances, idxs = self.tree.query(coord, k=k)
@@ -358,14 +373,7 @@ class NodeKDTree:
     def get_all_nodes(self):
         return self.nodes
 
-def reconstruct_path(came_from: dict[Node, Node], current: Node) -> list[Node]:
-    path = [current]
-    while came_from[current] is not None:
-        current = came_from[current]
-        path.append(current)
-    return path[::-1]
-
-def haversine_distance(node1, node2):
+def haversine_distance(node1: Node, node2: Node) -> float:
     lat1, lon1 = node1.coordinates
     lat2, lon2 = node2.coordinates
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
@@ -378,68 +386,86 @@ def haversine_distance(node1, node2):
     r = 6371 #km
     return c * r
 
-def a_star(start: Node, target: Node):
+def combined_heuristics(node: Node, target_coords: tuple[float, float]) -> float:
+    max_speed_kmh = 110
+    target_node = Node("TARGET", "TARGET", target_coords, 0)
+    geo_distance_km = haversine_distance(node, target_node)
+    return geo_distance_km / max_speed_kmh
+
+def algo_a_star(start_node: Node, end_coords: tuple[float, float]) -> tuple:
     open_set = []
-    heapq.heappush(open_set, (0, start))
-
-    came_from = {start: None}
-    g_score = {start: 0}
-    f_score = {start: start.heuristic}
-
-    all_nodes = set()
-    for neighbor, _ in start.neighbours:
-        all_nodes.add(neighbor)
-    for neighbor, _ in target.neighbours:
-        all_nodes.add(neighbor)
-    all_nodes.add(start)
-    all_nodes.add(target)
-
-    open_set_nodes = set([start])
-    closed_set_nodes = set()
+    heapq.heappush(open_set, (0, start_node))
+    came_from = {start_node: None}
+    g_score = {start_node: 0}
+    f_score = {start_node: combined_heuristics(start_node, end_coords)}
+    open_set_hash = {start_node}
 
     while open_set:
         current_f, current = heapq.heappop(open_set)
-        open_set_nodes.remove(current)
+        open_set_hash.remove(current)
 
-        if current == target:
-            final_path = reconstruct_path(came_from, current)
-            return final_path, g_score[target]
+        target_node = Node("TARGET", "TARGET", end_coords, 0)
+        if haversine_distance(current, target_node) < 0.01:
+            path = []
+            total_time = g_score[current]
+            while current:
+                path.append(current)
+                current = came_from[current]
+            return path[::-1], total_time
 
-        closed_set_nodes.add(current)
+        for neighbor in current.neighbors:
+            temp_g_score = g_score[current] + current.weight
 
-        for neighbor, edge_cost in current.neighbours:
-            if neighbor in closed_set_nodes:
-                continue
-
-            tentative_g = g_score[current] + edge_cost
-
-            if neighbor not in g_score or tentative_g < g_score[neighbor]:
+            if neighbor not in g_score or temp_g_score < g_score[neighbor]:
                 came_from[neighbor] = current
-                g_score[neighbor] = tentative_g
-                f_score[neighbor] = tentative_g + neighbor.heuristic
+                g_score[neighbor] = temp_g_score
+                f_score[neighbor] = temp_g_score + combined_heuristics(neighbor, end_coords)
 
-                if neighbor not in open_set_nodes:
+                if neighbor not in open_set_hash:
                     heapq.heappush(open_set, (f_score[neighbor], neighbor))
-                    open_set_nodes.add(neighbor)
+                    open_set_hash.add(neighbor)
 
-    return [], float('inf')
+    return None, float('inf')
+
+def build_neighbors(nodes: list[Node], max_distance_km=0.02):
+    coords_array = np.array([node.coordinates for node in nodes])
+    temp_kdtree = cKDTree(coords_array)
+
+    total_neighbors = 0
+    for idx, node in enumerate(nodes):
+        indices = temp_kdtree.query_ball_point(node.coordinates, max_distance_km)
+
+        for jdx in indices:
+            if jdx != idx:
+                neighbor_node = nodes[jdx]
+                node.neighbors.append(neighbor_node)
+                total_neighbors += 1
+
+
+    nodes_with_neighbors = sum(1 for node in nodes if node.neighbors)
+
+    return nodes
 
 def get_top_n_routes(coordinate_details: dict, node_kdtree: NodeKDTree, top_n=3):
     start_coords = coordinate_details["start"]
     end_coords = coordinate_details["end"]
 
-    nearby_start_nodes, _ = node_kdtree.find_nearest_neighbours(start_coords, k=top_n)
-    nearby_end_nodes, _ = node_kdtree.find_nearest_neighbours(end_coords, k=top_n)
+    nearby_start_nodes, start_distances = node_kdtree.find_nearest_neighbors(start_coords, k=top_n)
 
     routes = []
-    for i, (start_node, end_node) in enumerate(zip(nearby_start_nodes, nearby_end_nodes)):
-        print(f"Finding route {i+1}...")
-        path, cost = a_star(start_node, end_node)
-        if path:
-            routes.append((path, cost))
-            print(f"Route {i+1} found with cost: {cost:.2f}")
 
-    return sorted(routes, key=lambda x: x[1])[:top_n]
+    for start_node in nearby_start_nodes:
+        path, total_time = algo_a_star(start_node, end_coords)
+        if path:
+            routes.append({
+                'path': path,
+                'total_time_hours': total_time,
+                'start_node': start_node,
+                'end_coords': end_coords
+            })
+
+    routes.sort(key=lambda x: x['total_time_hours'])
+    return routes[:top_n]
 
 
 """
@@ -470,49 +496,48 @@ def main():
 
     gdf_traffic_with_wgs84 = convert_epsg_to_wgs84(parsed_gdf_traffic)
     traffic_light_locations: list = parse_traffic_light_locations(gdf_traffic_with_wgs84)
-    for tl in traffic_light_locations:
-        print(tl.node_id, tl.coordinates)
+    # for tl in traffic_light_locations:
+    #     print(tl.node_id, tl.coordinates)
 
-    # gdf_after_getting_segment_data, segment_data = get_segment_data(parsed_gdf_road)
-    # print("GDF: Segment length column added.")
+    gdf_after_getting_segment_data, segment_data = get_segment_data(parsed_gdf_road)
 
-    # gdf_with_speed = get_average_speed_by_street(gdf_after_getting_segment_data, headers=USER_HEADERS)
-    # print("GDF: Speed column added.")
+    gdf_with_speed = get_average_speed_by_street(gdf_after_getting_segment_data, headers=USER_HEADERS)
 
-    # gdf_with_weight = get_gdf_with_weight(gdf_with_speed)
-    # print("GDF: Heuristics column added.")
+    gdf_with_weight = get_gdf_with_weight(gdf_with_speed)
 
-    # gdf_with_wgs84 = convert_epsg_to_wgs84(gdf_with_weight)
-    # print("GDF: EPSG:2326 converted to WGS84.")
+    gdf_with_wgs84 = convert_epsg_to_wgs84(gdf_with_weight)
 
-    # nodes_from_gdf: list[Node] = get_nodes_from_gdf(gdf_with_wgs84)
-    # print("GDF: Retrieved all nodes from gdf.")
-
-    # node_kdtree = NodeKDTree(nodes_from_gdf)
-    # print("cKDTree: Built nodes into kdtree.")
+    nodes_from_gdf: list[Node] = get_nodes_from_gdf(gdf_with_wgs84)
+    nodes_from_gdf = build_neighbors(nodes_from_gdf, max_distance_km=0.02)
+    node_kdtree = NodeKDTree(nodes_from_gdf)
 
     # address look up
     start_address: str = "2 lung pak street"
     end_address: str = "89 pok fu lam road"
-    # osm_start_options: json = osm_address_lookup(request_address=start_address)
-    # osm_end_options: json = osm_address_lookup(request_address=end_address)
+    osm_start_options: json = osm_address_lookup(request_address=start_address)
+    osm_end_options: json = osm_address_lookup(request_address=end_address)
     # osm_start: dict = get_chosen_option(osm_start_options)
     # time.sleep(2)
     # osm_end: dict = get_chosen_option(osm_end_options)
     # coordinate_details: dict = get_coordinate_details(osm_start, osm_end)
-    # print(coordinate_details)
 
+    # hardcode coordinate details for now
     coordinate_details = {
         "start": [22.3642146, 114.1794265],
         "end": [22.2853336, 114.1330190]
     }
+
     # algorithm
-    # top_n_routes = get_top_n_routes(coordinate_details, node_kdtree, top_n=3)
-    # print("\nTop routes found:")
-    # for i, (path, cost) in enumerate(top_n_routes, 1):
-    #     print(f"Route {i}: Cost = {cost:.6f}")
-    #     for node in path:
-    #         print(f"  -> {node.ename} ({node.coordinates})")
+    top_n_routes = get_top_n_routes(coordinate_details, node_kdtree, top_n=3)
+    for i, route in enumerate(top_n_routes, 1):
+        print(f"\nRoute #{i}:")
+        print(f"Total time: {route['total_time_hours'] * 60:.2f} minutes")
+        print(f"Number of segments: {len(route['path'])}")
+        print("Segments:")
+
+        for j, node in enumerate(route['path'], 1):
+            lat, lon = node.coordinates
+            print(f"  {j}. {node.ename} (ID: {node.street_id}) - Lat: {lat:.6f}, Lon: {lon:.6f}")
 
 if __name__ == "__main__":
     main()
