@@ -698,6 +698,7 @@ def main():
 
         gdf_nodes.append(Node(street, street_ename, street["STREET_CNAME"], street["ELEVATION"], street["ST_CODE"], street["EXIT_NUM"], street["ROUTE_NUM"], street["REMARKS"], street["ROUTE_ID"], street["TRAVEL_DIRECTION"], street["CRE_DATE"], street["LAST_UPD_DATE_V"], street["ALIAS_ENAME"], street["ALIAS_CNAME"], street["SHAPE_Length"], street["geometry"], speed_limit))
 
+    remove_filepath('gdf_nodes.json')
     with open('gdf_nodes.json', 'w', encoding='utf-8') as nodes_f:
         json.dump(gdf_nodes, nodes_f, ensure_ascii=False, indent=2)
 
