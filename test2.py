@@ -1,6 +1,8 @@
 import requests, bs4, json, re
 from bs4 import BeautifulSoup
 
+# ename: CASTLE PEAK ROAD - TSUEN WAN, cname: 青山公路　–　荃灣段, (22.375549046183203, 114.10608739043457)
+
 def osm_address_lookup(request_address: str) -> json:
     NOMINATIM_HEADERS = {
         "User-Agent": "Roadblocker/1.0 (daniellautc@gmail.com)"
@@ -41,7 +43,6 @@ def is_valid_road_eng(name_str: str) -> bool:
 def is_valid_road_cn(name_str: str) -> bool:
     CHINESE_ROAD_TYPES = ["街道", "街", "隧道", "道", "公路"]
     return any(word in name_str for word in CHINESE_ROAD_TYPES)
-
 
 def get_lang_names_v2(name_str: str) -> tuple[str, str]:
     dash_name_str = regulate_dashes(name_str)
@@ -89,8 +90,7 @@ def get_chinese_address_name(eng_address: str) -> str:
     return cname
 
 def main():
-    res = get_chinese_address_name("ocean park road")
-    print(res)
+    get_lang_names_v2("CASTLE PEAK ROAD - TSUEN WAN 青山公路　–　荃灣段")
 
 if __name__ == "__main__":
     main()

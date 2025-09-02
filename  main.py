@@ -12,44 +12,10 @@ from colorama import Fore as CFore
 from colorama import Style as CStyle
 
 
-# visualizer
+
 """----------
     UTILS
 ----------"""
-def convert_mls_crs(mls_str) -> list[tuple[float, float]]:
-    crs_transformer = Transformer.from_crs("EPSG:2326", "EPSG:4326", always_xy=True)
-    all_coords = []
-
-    if mls_str.geom_type == 'MultiLineString':
-        for line_string in mls_str.geoms:
-            for coord in line_string.coords:
-                eing, ning = coord
-                if eing is not None and ning is not None:
-                    lon, lat = crs_transformer.transform(eing, ning)
-                    all_coords.append((lat, lon))
-
-    elif mls_str.geom_type == 'LineString':
-        for coord in mls_str.coords:
-            eing, ning = coord
-            if eing is not None and ning is not None:
-                lon, lat = crs_transformer.transform(eing, ning)
-                all_coords.append((lat, lon))
-
-    elif mls_str.geom_type == 'Point':
-        eing, ning = mls_str.coords[0]
-        if eing is not None and ning is not None:
-            lon, lat = crs_transformer.transform(eing, ning)
-            all_coords.append((lat, lon))
-
-    return all_coords
-
-def get_lang_name(name_str: str) -> list[str, str]:
-    chinese_pattern = r'[\u4e00-\u9fff]+'
-    chinese_matches = re.findall(chinese_pattern, name_str)
-    chinese_name = ' '.join(chinese_matches) if chinese_matches else ""
-    english_name = re.sub(chinese_pattern, '', name_str).strip()
-    return english_name, chinese_name
-
 def remove_filepath(filepath: str) -> None:
     if os.path.exists(filepath):
         os.remove(filepath)
@@ -142,6 +108,8 @@ def color_msg(color, msg):
     }
     return f"{colors[color.lower()]}{msg}{CStyle.RESET_ALL}"
 
+
+
 """---------
   ROAD GDF
 ---------"""
@@ -164,49 +132,6 @@ def get_latest_road_network(input_dirpath: str) -> None:
         zip_f.extractall(input_dirpath)
 
     os.remove(dataset_zip_path)
-
-def expand_gdf_cols(gdf: gpd.geodataframe.GeoDataFrame, headers: dict) -> gpd.geodataframe.GeoDataFrame:
-    new_gdf = gdf.copy()
-    expressway_limits = get_expressway_limits(headers)
-    crs_transformer = Transformer.from_crs("EPSG:2326", "EPSG:4326", always_xy=True)
-    if not expressway_limits:
-        print('problem occurred in get_expressway_limits()')
-        return None
-
-    new_gdf["speed_limit"] = 50
-    new_gdf["average_speed"] = 0.0
-    new_gdf["weight"] = 0.0
-    coords_list = []
-
-    for idx, street in new_gdf.iterrows():
-        street_ename = street["STREET_ENAME"]
-        street_length_km = street["SHAPE_Length"] / 1000
-        street_geom = street["geometry"]
-        street_geom_coords = convert_mls_crs(street_geom)
-
-        for street_geom_coord in street_geom_coords:
-            print(street_geom_coord)
-            eing, ning = street_geom_coord
-            lon, lat = crs_transformer.transform(eing, ning)
-            coords_list.append((lat, lon))
-
-        if street_ename in expressway_limits:
-            speed_limit_val = expressway_limits[street_ename]
-            speed_limit = speed_limit_val
-            if isinstance(speed_limit, tuple):
-                speed_limit = max(speed_limit_val)
-
-            new_gdf.at[idx, 'speed_limit'] = speed_limit
-
-        new_gdf.at[idx, 'average_speed'] = 0.9 * new_gdf.at[idx, 'speed_limit']
-        new_gdf.at[idx, 'weight'] = street_length_km / new_gdf.at[idx, 'average_speed']
-        new_gdf.at[idx, 'coords'] = coords_list
-
-    print("GDF: speed_limit column added.")
-    print("GDF: average_speed column added")
-    print("GDF: weight column added")
-    print("GDF: EPSG:2326 converted to WGS84 for gdf.")
-    return new_gdf
 
 def parse_gdb_files(input_dirpath: str, headers: dict, specified_name="CENTERLINE") -> gpd.geodataframe.GeoDataFrame:
     gdb_dirs: list = [file for file in os.listdir(input_dirpath) if file.endswith('.gdb')]
@@ -280,6 +205,7 @@ def get_nodes_from_gdf(gdf: gpd.geodataframe.GeoDataFrame) -> list:
 
     print("GDF: Retrieved all nodes from gdf.")
     return gdf_nodes
+
 
 
 """--------------
@@ -385,184 +311,13 @@ def get_coordinate_details(start_details: dict, end_details: dict):
         "end": (float(end_details["lat"]), float(end_details["lon"])),
     }
 
-
-# class NodeKDTree:
-#     def __init__(self, nodes: list[Node]=None):
-#         self.tree = None
-#         self.nodes = nodes or []
-#         self.coords_array = None
-
-#         if nodes:
-#             self.build_tree(nodes)
-
-#     def build_tree(self, nodes: list[Node]):
-#         self.nodes = nodes
-#         self.coords_array = np.array([node.coordinates for node in nodes])
-#         self.tree = cKDTree(self.coords_array)
-#         print("cKDTree: Built nodes into kdtree.")
-
-#     def add_node(self, node: Node):
-#         self.nodes.append(node)
-#         self.build_tree(self.nodes)
-
-#     def find_nearest_neighbors(self, coord: list[float], k: int = 1):
-#         if not self.tree:
-#             raise ValueError("cKDTree not built yet.")
-#         distances, idxs = self.tree.query(coord, k=k)
-#         if k == 1:
-#             return self.nodes[idxs], distances
-#         else:
-#             return [self.nodes[i] for i in idxs], distances
-
-#     def get_all_nodes(self):
-        # return self.nodes
-
-# def haversine_distance(node1: Node, node2: Node) -> float:
-#     lat1, lon1 = node1.coordinates
-#     lat2, lon2 = node2.coordinates
-#     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-
-#     dlat = lat2 - lat1
-#     dlon = lon2 - lon1
-#     a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
-#     c = 2 * math.asin(math.sqrt(a))
-
-#     r = 6371 #km
-#     return c * r
-
-# def combined_heuristics(node: Node, target_coords: tuple[float, float]) -> float:
-#     max_speed_kmh = 110
-#     target_node = Node("TARGET", "TARGET", target_coords, 0)
-#     geo_distance_km = haversine_distance(node, target_node)
-#     return geo_distance_km / max_speed_kmh
-
-# def build_neighbors_based_on_geometry(gdf: gpd.geodataframe.GeoDataFrame, nodes: list[Node], distance_threshold=1.0) -> list[Node]:
-#     """Build neighbors based on actual geometric connections between road segments"""
-
-#     # Create a spatial index for faster intersection checks
-#     spatial_index = gdf.sindex
-#     total_neighbors = 0
-
-#     for idx, (_, row) in enumerate(gdf.iterrows()):
-#         current_geom = row["geometry"]
-#         current_node = nodes[idx]
-
-#         # Use a buffer to find nearby segments (more efficient than checking all)
-#         buffered_geom = current_geom.buffer(distance_threshold)  # 1 meter buffer
-#         possible_matches_index = list(spatial_index.intersection(buffered_geom.bounds))
-
-#         for match_idx in possible_matches_index:
-#             if match_idx == idx:  # Skip self
-#                 continue
-
-#             match_row = gdf.iloc[match_idx]
-#             match_geom = match_row["geometry"]
-#             match_node = nodes[match_idx]
-
-#             # Check if geometries intersect or are close
-#             if (current_geom.intersects(match_geom) or
-#                 current_geom.distance(match_geom) < distance_threshold):
-#                 if match_node not in current_node.neighbors:
-#                     current_node.neighbors.append(match_node)
-#                     total_neighbors += 1
-
-#     print(f"Built {total_neighbors} geometric neighbor relationships for {len(nodes)} nodes")
-#     nodes_with_neighbors = sum(1 for node in nodes if node.neighbors)
-#     print(f"{nodes_with_neighbors} nodes have at least one geometric neighbor")
-
-#     return nodes
-
-# def algo_a_star(start_node: Node, end_coords: tuple[float, float], timeout_seconds=10) -> tuple:
-#     start_time = time.time()
-#     open_set = []
-#     heapq.heappush(open_set, (0, start_node))
-#     came_from   : dict[Node, None] = {start_node: None}
-#     g_score     : dict[Node, float] = {start_node: 0}
-#     f_score     : dict[Node, float] = {start_node: combined_heuristics(start_node, end_coords)}
-#     closed_set = set()
-#     iterations = 0
-
-#     while open_set:
-#         iterations += 1
-#         # Timeout check
-#         if time.time() - start_time > timeout_seconds:
-#             print(f"  A* timeout after {iterations} iterations")
-#             return None, float('inf')
-
-#         current_f, current = heapq.heappop(open_set)
-#         if current in closed_set:
-#             continue
-
-#         closed_set.add(current)
-#         target_node: Node = Node("TARGET", "TARGET", end_coords, 0)
-
-#         # Check distance to target
-#         distance_to_target = haversine_distance(current, target_node)
-#         if distance_to_target < 0.1:  # 100 meters
-#             path = []
-#             total_time: float = g_score[current]
-#             while current:
-#                 path.append(current)
-#                 current = came_from[current]
-#             print(f"  Found route! Distance to target: {distance_to_target:.3f} km, Iterations: {iterations}")
-#             return path[::-1], total_time
-
-#         # Progress tracking
-#         if iterations % 1000 == 0:
-#             print(f"  Iteration {iterations}: Open set: {len(open_set)}, Closed set: {len(closed_set)}")
-
-#         for neighbor in current.neighbors:
-#             if neighbor in closed_set:
-#                 continue
-
-#             temp_g_score: float = g_score[current] + neighbor.weight
-#             if neighbor not in g_score or temp_g_score < g_score[neighbor]:
-#                 came_from[neighbor] = current
-#                 g_score[neighbor] = temp_g_score
-#                 f_score[neighbor] = temp_g_score + combined_heuristics(neighbor, end_coords)
-#                 heapq.heappush(open_set, (f_score[neighbor], neighbor))
-
-#     print(f"  No path found after {iterations} iterations")
-#     return None, float('inf')
-
-# def get_top_n_routes(coordinate_details: dict, node_kdtree: NodeKDTree, top_n=3):
-    # start_coords = coordinate_details["start"]
-    # end_coords = coordinate_details["end"]
-    # nearby_start_nodes, start_distances = node_kdtree.find_nearest_neighbors(start_coords, k=top_n)
-
-    # print(f"Found {len(nearby_start_nodes)} start nodes near {start_coords}")
-    # for i, (node, dist) in enumerate(zip(nearby_start_nodes, start_distances)):
-    #     print(f"  Start node {i+1}: {node.ename} (ID: {node.street_id}) - Distance: {dist:.6f} km")
-    #     print(f"    This node has {len(node.neighbors)} neighbors")
-    #     if node.neighbors:
-    #         for neighbor in node.neighbors[:3]:  # Show first 3 neighbors
-    #             neighbor_dist = haversine_distance(node, neighbor)
-    #             print(f"      Neighbor: {neighbor.ename} - Distance: {neighbor_dist:.6f} km")
-
-    # routes = []
-    # for i, start_node in enumerate(nearby_start_nodes):
-    #     print(f"Running A* from start node {i+1}...")
-    #     path, total_time = algo_a_star(start_node, end_coords, timeout_seconds=15)
-    #     if path:
-    #         print(f"  Found route with {len(path)} segments, time: {total_time*60:.2f} min")
-    #         routes.append({
-    #             'path': path,
-    #             'total_time_hours': total_time,
-    #             'start_node': start_node,
-    #             'end_coords': end_coords
-    #         })
-    #     else:
-    #         print("  No route found from this start node")
-
-    # routes.sort(key=lambda x: x['total_time_hours'])
-    # return routes[:top_n]
-
 def get_gm_api_key() -> str:
     with open("apikey.txt", 'r', encoding='utf-8') as key_f:
         return key_f.readline().strip()
 
 class GMAddress:
-    def __init__(self, long_name, short_name, road_type, category, coords):
+    def __init__(self, api_key: str, long_name: str, short_name: str, road_type: str, category: str, coords: tuple[float, float]):
+        self.api_key = api_key
         self.long_name = long_name
         self.short_name = short_name
         self.road_type = road_type
@@ -580,10 +335,9 @@ class GMAddress:
         format_lat: float = round(lat, 5)
         format_lon: float = round(lon, 5)
         format_coords = f"{format_lat}, {format_lon}"
-        api_key = get_gm_api_key()
         params = {
             'locations': format_coords,
-            'key': api_key
+            'key': self.api_key
         }
         url = "https://maps.googleapis.com/maps/api/elevation/json"
         headers = {
@@ -600,36 +354,11 @@ class GMAddress:
         elevation = result['results'][0]['elevation']
         return elevation
 
-def get_gm_address(results: list, elevation: float, road_category: str) -> str | None:
-    gm_address_nodes = []
-    for result in results:
-        address_components = result["address_components"]
-        location = result["geometry"]["location"]
-        lat = location["lat"]
-        lon = location["lng"]
-        coordinates = (lat, lon)
-        for component in address_components:
-            comp_type = component["types"]
-            long_name = component["long_name"].upper()
-            short_name = component["short_name"].upper()
-            if len(comp_type) == 1 and comp_type[0] == "route" and not long_name.isdigit() and not short_name.isdigit():
-                gm_address_nodes.append(GMAddress(long_name, short_name, comp_type, road_category, coordinates))
-
-    valid_nodes = [node for node in gm_address_nodes if node.elevation is not None]
-
-    if not valid_nodes:
-        print("no gm address valid nodes.")
-        return None
-
-    if road_category == 'highway':
-        return max(valid_nodes, key=lambda x: x.elevation)
-    else:
-        return min(valid_nodes, key=lambda x: x.elevation)
-
 class Node:
-    def __init__(self, ename, cname, elevation, st_code, exit_num, route_num, remarks, route_id, travel_direction, cre_date, last_upd_date_v, alias_ename, alias_cname, shape_length, geometry, speed_limit):
-        self.ename                  : str = ename
-        self.cname                  : str = cname
+    def __init__(self, api_key: str, ename: str, cname: str, elevation: int, st_code: float, exit_num: int | None, route_num: int | None, remarks: str | None, route_id: int, travel_direction: int, cre_date: str, last_upd_date_v: str, alias_ename: str | None, alias_cname: str | None, shape_length: float, geometry: shapely_mls.MultiLineString, speed_limit: int):
+        self.api_key                : str = api_key
+        self.ename                  : str = self._regulate_dashes(ename)
+        self.cname                  : str = self._regulate_dashes(cname)
         self.elevation              : int = elevation
         self.st_code                : float = st_code
         self.exit_num               : int | None = exit_num
@@ -646,17 +375,19 @@ class Node:
         self.geometry               : shapely_mls.MultiLineString = geometry
         self.speed_limit            : int = speed_limit
         self.average_speed          : float = float(self.speed_limit * 0.9)
-        self.wgs84_geometry         : list[tuple] = convert_mls_crs(self.geometry)
+        self.wgs84_geometry         : list[tuple] = self._convert_mls_crs()
         self.geometry_start_point   : tuple = self.wgs84_geometry[0]
         self.heuristic              : float = self.shape_length_km / 110.0
         self.road_category          : str = ""
         self.road_type              : str = ""
         self.node_dict              : dict = None
+        self.english_road_types     : list = ["Street", "Road", "Drive", "Terrace", "Highway", "Tunnel", "Expressway", "Bypass", "Avenue", "Boulevard"]
+        self.chinese_road_types     : list = ["街道", "街", "隧道", "道", "公路"]
 
         if self.geometry_start_point:
             self.elevation = self.get_elevation(self.geometry_start_point)
 
-        if (self.ename == '-99' or self.ename == None) and self.elevation != 0:
+        if (self.ename == '-99' or self.ename == None or '-' in self.ename) and self.elevation != 0:
             self.correct_street_names()
         else:
             self._print()
@@ -664,7 +395,7 @@ class Node:
         if self.ename != '-99' and self.ename != None and self.ename != '' and  self.road_category != "" and self.road_type != '':
             self.create_node_dict()
 
-    def create_node_dict(self):
+    def create_node_dict(self) -> dict:
         return {
             "ename": self.ename,
             "cname": self.cname,
@@ -689,34 +420,87 @@ class Node:
             "road_type": self.road_type
         }
 
-    def get_node_dict(self):
+    def get_node_dict(self) -> dict:
         return self.node_dict
 
-    def _print(self, color: str = "green"):
+    def _print(self, color: str = "green") -> None:
         statement = color_msg(color, f"ename: {self.ename}, cname: {self.cname}, {self.geometry_start_point}")
         print(statement)
 
+    def _convert_mls_crs(self) -> list[tuple[float, float]]:
+        mls_str = self.geometry
+        crs_transformer = Transformer.from_crs("EPSG:2326", "EPSG:4326", always_xy=True)
+        all_coords = []
+
+        if mls_str.geom_type == 'MultiLineString':
+            for line_string in mls_str.geoms:
+                for coord in line_string.coords:
+                    eing, ning = coord
+                    if eing is not None and ning is not None:
+                        lon, lat = crs_transformer.transform(eing, ning)
+                        all_coords.append((lat, lon))
+
+        elif mls_str.geom_type == 'LineString':
+            for coord in mls_str.coords:
+                eing, ning = coord
+                if eing is not None and ning is not None:
+                    lon, lat = crs_transformer.transform(eing, ning)
+                    all_coords.append((lat, lon))
+
+        elif mls_str.geom_type == 'Point':
+            eing, ning = mls_str.coords[0]
+            if eing is not None and ning is not None:
+                lon, lat = crs_transformer.transform(eing, ning)
+                all_coords.append((lat, lon))
+
+        return all_coords
+
     def _regulate_dashes(self, name_str: str) -> str:
-        new_name_str = name_str
-        all_possible_dashes = ['\u002D', '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2053', '\u207B', '\u208B', '\u2212', '\u2E17', '\u2E1A', '\u2E3A', '\u2E3B', '\uFE58', '\uFE63', '\uFF0D', '\uFF5E']
-        for dash in all_possible_dashes:
-            new_name_str = new_name_str.replace(dash, "-")
+        if not name_str: return name_str
+        dash_chars = '\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2053\u207B\u208B\u2212\u2E17\u2E1A\u2E3A\u2E3B\uFE58\uFE63\uFF0D\uFF5E'
+        if not any(char in name_str for char in dash_chars): return name_str
+        dash_translation = str.maketrans(dash_chars, '-' * len(dash_chars))
+        return name_str.translate(dash_translation)
 
-        return new_name_str
+    def _is_valid_road_eng(self, name_str: str) -> bool:
+        return any(word in name_str for word in self.english_road_types)
 
-    def _is_valid_road_eng(name_str: str) -> bool:
-        ROAD_TYPES = ["Street", "Road", "Drive", "Terrace", "Highway", "Tunnel", "Expressway", "Bypass", "Avenue", "Boulevard"]
-        return any(word in name_str for word in ROAD_TYPES)
-
-    def _is_valid_road_cn(name_str: str) -> bool:
-        CHINESE_ROAD_TYPES = ["街道", "街", "隧道", "道", "公路"]
-        return any(word in name_str for word in CHINESE_ROAD_TYPES)
+    def _is_valid_road_cn(self, name_str: str) -> bool:
+        return any(word in name_str for word in self.chinese_road_types)
 
     def _is_text_chinese(self, text: str) -> bool:
         chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
         return bool(chinese_pattern.search(text))
 
-    def osm_reverse_lookup(self, coord_tuple: tuple) -> json:
+    def _extract_english_name(self, text: str) -> str:
+        if not text: return ""
+        if any(road_type in text for road_type in self.english_road_types):
+            return text
+
+        if '-' in text and len(text) > 5:
+            parts = [part.strip() for part in text.split('-')]
+            for part in parts:
+                if any(road_type in part for road_type in self.english_road_types):
+                    return part
+            return parts[0] if parts else text
+
+        return text
+
+    def _extract_chinese_name(self, text: str) -> str:
+        if not text: return ""
+        if any(road_type in text for road_type in self.chinese_road_types):
+            return text
+
+        if '-' in text and len(text) > 2:
+            parts = [part.strip() for part in text.split('-')]
+            for part in parts:
+                if any(road_type in part for road_type in self.chinese_road_types):
+                    return part
+            return parts[0] if parts else text
+
+        return text
+
+    def osm_reverse_lookup(self, coord_tuple: tuple[float, float]) -> json:
         NOMINATIM_HEADERS = {
             "User-Agent": "Roadblocker/1.0 (daniellautc@gmail.com)"
         }
@@ -752,7 +536,7 @@ class Node:
         print("Max retries exceeded for reverse lookup")
         return None
 
-    def gm_reverse_lookup(self, coord_tuple: tuple) -> json:
+    def gm_reverse_lookup(self, coord_tuple: tuple[float, float]) -> json:
         apikey = get_gm_api_key()
         gmaps = googlemaps.Client(key=apikey)
         lat, lon = coord_tuple
@@ -760,6 +544,37 @@ class Node:
         if not reverse_geocode_result:
             return "No results found for these coordinates."
         return reverse_geocode_result
+
+    def get_gm_address(self) -> str | None:
+        results = self.gm_reverse_lookup(self.geometry_start_point)
+        gm_address_nodes = []
+        for result in results:
+            address_components = result["address_components"]
+            location = result["geometry"]["location"]
+            lat = location["lat"]
+            lon = location["lng"]
+            coordinates = (lat, lon)
+
+            for component in address_components:
+                comp_type = component["types"]
+                long_name = component["long_name"].upper()
+                short_name = component["short_name"].upper()
+
+                if len(comp_type) == 1 and comp_type[0] == "route" and not long_name.isdigit() and not short_name.isdigit():
+                    gm_address_nodes.append(
+                        GMAddress(self.api_key, long_name, short_name, comp_type, self.road_category, coordinates)
+                    )
+
+        valid_nodes = [node for node in gm_address_nodes if node.elevation is not None]
+
+        if not valid_nodes:
+            print("no gm address valid nodes.")
+            return None
+
+        if self.road_category == 'highway':
+            return max(valid_nodes, key=lambda x: x.elevation)
+        else:
+            return min(valid_nodes, key=lambda x: x.elevation)
 
     def get_lang_names_v2(self, name_str: str) -> tuple[str, str]:
         dash_name_str = self._regulate_dashes(name_str)
@@ -795,6 +610,37 @@ class Node:
 
         return english_name, chinese_name
 
+    def get_lang_names_v3(self, name_str: str) -> tuple[str, str]:
+        dash_name_str = self._regulate_dashes(name_str)
+
+        if ',' in dash_name_str:
+            parts = [part.strip() for part in dash_name_str.split(',', 1)]
+            if len(parts) == 2:
+                eng_part, cn_part = parts
+                if eng_part and eng_part[0].isascii() and cn_part and '\u4e00' <= cn_part[0] <= '\u9fff':
+                    return self._extract_english_name(eng_part), self._extract_chinese_name(cn_part)
+                elif cn_part and cn_part[0].isascii() and eng_part and '\u4e00' <= eng_part[0] <= '\u9fff':
+                    return self._extract_english_name(cn_part), self._extract_chinese_name(eng_part)
+
+        dash_pos = dash_name_str.find('-')
+        if dash_pos == -1:
+            chinese_pattern = r'[\u4e00-\u9fff]+'
+            chinese_matches = re.findall(chinese_pattern, dash_name_str)
+            chinese_name = ' '.join(chinese_matches) if chinese_matches else ""
+            english_name = re.sub(chinese_pattern, '', dash_name_str).strip()
+            return english_name, chinese_name
+
+        left_part = dash_name_str[:dash_pos].strip()
+        right_part = dash_name_str[dash_pos + 1:].strip()
+
+        left_is_english = left_part and left_part[0].isascii()
+        right_is_chinese = right_part and '\u4e00' <= right_part[0] <= '\u9fff'
+
+        if left_is_english and right_is_chinese:
+            return self._extract_english_name(left_part), self._extract_chinese_name(right_part)
+        else:
+            return self._extract_english_name(right_part), self._extract_chinese_name(left_part)
+
     def get_chinese_address_name(self, address="") -> str:
         given_address = self.ename if address == "" else address
         eng_addr_lookup = osm_address_lookup(given_address)[0]
@@ -812,10 +658,9 @@ class Node:
         format_lat: float = round(lat, 5)
         format_lon: float = round(lon, 5)
         format_coords = f"{format_lat}, {format_lon}"
-        api_key = get_gm_api_key()
         params = {
             'locations': format_coords,
-            'key': api_key
+            'key': self.api_key
         }
         url = "https://maps.googleapis.com/maps/api/elevation/json"
         headers = {
@@ -833,12 +678,15 @@ class Node:
         return elevation
 
     def correct_street_names(self):
+        print("using correct_street_names()")
+        print(f"current names: {self.ename}, {self.cname}")
         osm_reverse_result = self.osm_reverse_lookup(self.geometry_start_point)
         used_gmaps = False
 
         new_ename = None
         new_cname = None
         if osm_reverse_result:
+            print("using osm api")
             self.road_category = osm_reverse_result["category"]
             self.road_type = osm_reverse_result["addresstype"]
             try:
@@ -847,7 +695,7 @@ class Node:
                 address_name: str = osm_reverse_result["name"]
 
             new_ename, new_cname = self.get_lang_names_v2(address_name)
-
+            print(f"osm api: {new_ename}, {new_cname}")
             if new_ename != "" and new_cname != "":
                 self.ename = new_ename.upper()
                 if self._is_text_chinese(new_cname):
@@ -858,9 +706,10 @@ class Node:
                 return
 
             else:
-                gm_reverse_result = self.gm_reverse_lookup(self.geometry_start_point)
-                gm_address = get_gm_address(gm_reverse_result, self.elevation, self.road_category)
+                print("using gm api")
+                gm_address = self.get_gm_address()
                 if gm_address:
+                    print(f"gm api: {gm_address.long_name}, {gm_address.short_name}")
                     self.ename = gm_address.long_name
 
                     if self._is_text_chinese(gm_address.short_name):
@@ -881,7 +730,6 @@ class Node:
 
         # self._print("red")
 
-
 def main():
 
     # gdf stuff
@@ -893,7 +741,7 @@ def main():
         'Connection': 'keep-alive',
     }
     dataset_dirpath: str = get_dataset_dirpath()
-
+    gm_api_key: str = get_gm_api_key()
     get_latest_road_network(input_dirpath=dataset_dirpath)
 
     parsed_gdf_road = parse_gdb_files(dataset_dirpath, USER_HEADERS, "CENTERLINE")
@@ -906,7 +754,7 @@ def main():
         if street_ename in expressway_limits:
             speed_limit = expressway_limits[street_ename]
 
-        gdf_nodes.append(Node(street_ename, street["STREET_CNAME"], street["ELEVATION"], street["ST_CODE"], street["EXIT_NUM"], street["ROUTE_NUM"], street["REMARKS"], street["ROUTE_ID"], street["TRAVEL_DIRECTION"], street["CRE_DATE"], street["LAST_UPD_DATE_V"], street["ALIAS_ENAME"], street["ALIAS_CNAME"], street["SHAPE_Length"], street["geometry"], speed_limit))
+        gdf_nodes.append(Node(gm_api_key, street_ename, street["STREET_CNAME"], street["ELEVATION"], street["ST_CODE"], street["EXIT_NUM"], street["ROUTE_NUM"], street["REMARKS"], street["ROUTE_ID"], street["TRAVEL_DIRECTION"], street["CRE_DATE"], street["LAST_UPD_DATE_V"], street["ALIAS_ENAME"], street["ALIAS_CNAME"], street["SHAPE_Length"], street["geometry"], speed_limit))
 
     gdf_node_dicts = []
     for gdf_node in gdf_nodes:
