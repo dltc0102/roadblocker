@@ -474,31 +474,23 @@ class Node:
 
     def _extract_english_name(self, text: str) -> str:
         if not text: return ""
-        if any(road_type in text for road_type in self.english_road_types):
-            return text
-
-        if '-' in text and len(text) > 5:
+        if '-' in text:
             parts = [part.strip() for part in text.split('-')]
             for part in parts:
-                if any(road_type in part for road_type in self.english_road_types):
-                    return part
-            return parts[0] if parts else text
-
-        return text
+                if any(road_type in part for road_type in self.english_road_types): return part
+                if part and part[0].isascii(): return part
+            return parts[0] if parts else ""
+        return text.strip()
 
     def _extract_chinese_name(self, text: str) -> str:
         if not text: return ""
-        if any(road_type in text for road_type in self.chinese_road_types):
-            return text
-
-        if '-' in text and len(text) > 2:
+        if '-' in text:
             parts = [part.strip() for part in text.split('-')]
             for part in parts:
-                if any(road_type in part for road_type in self.chinese_road_types):
-                    return part
-            return parts[0] if parts else text
-
-        return text
+                if any(road_type in part for road_type in self.chinese_road_types): return part
+                if any('\u4e00' <= char <= '\u9fff' for char in part): return part
+            return parts[0] if parts else ""
+        return text.strip()
 
     def osm_reverse_lookup(self, coord_tuple: tuple[float, float]) -> json:
         NOMINATIM_HEADERS = {
@@ -576,70 +568,34 @@ class Node:
         else:
             return min(valid_nodes, key=lambda x: x.elevation)
 
-    def get_lang_names_v2(self, name_str: str) -> tuple[str, str]:
+    def get_lang_names_v4(self, name_str: str) -> tuple[str, str]:
         dash_name_str = self._regulate_dashes(name_str)
-        has_dash = '-' in dash_name_str
-        if not has_dash:
-            chinese_pattern = r'[\u4e00-\u9fff]+'
-            chinese_matches = re.findall(chinese_pattern, dash_name_str)
+        dash_positions = [i for i, char in enumerate(dash_name_str) if char == '-']
+
+        if not dash_positions:
+            chinese_matches = re.findall(r'[\u4e00-\u9fff]+', dash_name_str)
             chinese_name = ' '.join(chinese_matches) if chinese_matches else ""
-            english_name = re.sub(chinese_pattern, '', dash_name_str).strip()
+            english_name = re.sub(r'[\u4e00-\u9fff]+', '', dash_name_str).strip()
             return english_name, chinese_name
 
-        parts = dash_name_str.split()
+        space_positions = [i for i, char in enumerate(dash_name_str) if char == ' ']
+        first_char = dash_name_str[0]
+        left_is_chinese = self._is_text_chinese(first_char)
 
-        # english
-        english_start_idx = next((i for i, part in enumerate(parts) if part and part[0].isascii() and part[0].isalpha()), 0)
-        raw_english_parts = parts[english_start_idx:]
-        dash_idx = raw_english_parts.index("-")
-        english_parts = [' '.join(raw_english_parts[:dash_idx]), ' '.join(raw_english_parts[dash_idx+1:])]
-        english_name = None
-        for eng_part in english_parts:
-            if self._is_valid_road_eng(eng_part):
-                english_name = eng_part
-                break
-
-        # chinese
-        chinese_full_name = parts[:english_start_idx][0].strip()
-        chinese_parts = chinese_full_name.split("-")
-        chinese_name = None
-        for chi_part in chinese_parts:
-            if self._is_valid_road_cn(chi_part):
-                chinese_name = chi_part
-                break
-
-        return english_name, chinese_name
-
-    def get_lang_names_v3(self, name_str: str) -> tuple[str, str]:
-        dash_name_str = self._regulate_dashes(name_str)
-
-        if ',' in dash_name_str:
-            parts = [part.strip() for part in dash_name_str.split(',', 1)]
-            if len(parts) == 2:
-                eng_part, cn_part = parts
-                if eng_part and eng_part[0].isascii() and cn_part and '\u4e00' <= cn_part[0] <= '\u9fff':
-                    return self._extract_english_name(eng_part), self._extract_chinese_name(cn_part)
-                elif cn_part and cn_part[0].isascii() and eng_part and '\u4e00' <= eng_part[0] <= '\u9fff':
-                    return self._extract_english_name(cn_part), self._extract_chinese_name(eng_part)
-
-        dash_pos = dash_name_str.find('-')
-        if dash_pos == -1:
-            chinese_pattern = r'[\u4e00-\u9fff]+'
-            chinese_matches = re.findall(chinese_pattern, dash_name_str)
-            chinese_name = ' '.join(chinese_matches) if chinese_matches else ""
-            english_name = re.sub(chinese_pattern, '', dash_name_str).strip()
-            return english_name, chinese_name
-
-        left_part = dash_name_str[:dash_pos].strip()
-        right_part = dash_name_str[dash_pos + 1:].strip()
-
-        left_is_english = left_part and left_part[0].isascii()
-        right_is_chinese = right_part and '\u4e00' <= right_part[0] <= '\u9fff'
-
-        if left_is_english and right_is_chinese:
-            return self._extract_english_name(left_part), self._extract_chinese_name(right_part)
+        english_part = None
+        chinese_part = None
+        if left_is_chinese:
+            # right is english
+            # 青山公路-青龍頭段 Castle Peak Road-Tsing Lung Tau
+            chinese_part = dash_name_str[:space_positions[0]].strip()
+            english_part = dash_name_str[space_positions[0]+1:].strip()
         else:
-            return self._extract_english_name(right_part), self._extract_chinese_name(left_part)
+            # left is english
+            # Castle Peak Road-Tsing Lung Tau 青山公路-青龍頭段
+            chinese_part = dash_name_str[space_positions[-1]:].strip()
+            english_part = dash_name_str[:space_positions[-1]].strip()
+
+        return self._extract_english_name(english_part), self._extract_chinese_name(chinese_part)
 
     def get_chinese_address_name(self, address="") -> str:
         given_address = self.ename if address == "" else address
@@ -650,7 +606,7 @@ class Node:
         except KeyError:
             eng_addr_result = eng_addr_lookup["name"]
 
-        ename, cname = self.get_lang_names_v2(eng_addr_result)
+        ename, cname = self.get_lang_names_v4(eng_addr_result)
         return cname
 
     def get_elevation(self, coords_tuple: tuple[float, float]) -> float:
@@ -679,7 +635,7 @@ class Node:
 
     def correct_street_names(self):
         print("using correct_street_names()")
-        print(f"current names: {self.ename}, {self.cname}")
+        print(f"current names: {self.ename}, {self.cname}, {self.geometry_start_point}")
         osm_reverse_result = self.osm_reverse_lookup(self.geometry_start_point)
         used_gmaps = False
 
@@ -694,7 +650,8 @@ class Node:
             except KeyError:
                 address_name: str = osm_reverse_result["name"]
 
-            new_ename, new_cname = self.get_lang_names_v2(address_name)
+            print(f"address_name: {address_name}")
+            new_ename, new_cname = self.get_lang_names_v4(address_name)
             print(f"osm api: {new_ename}, {new_cname}")
             if new_ename != "" and new_cname != "":
                 self.ename = new_ename.upper()
@@ -765,30 +722,7 @@ def main():
         json.dump(gdf_node_dicts, nodes_f, ensure_ascii=False, indent=2, default=str)
 
     print("added all gdf_nodes' data to gdf_nodes.json")
-    #     json.dump(gdf_nodes, nodes_f, ensure_ascii=False, indent=2)
 
-
-    # for idx, street in parsed_gdf_road.iterrows():
-    #     print(street)
-
-
-    # parsed_gdf_traffic = parse_gdb_files(input_dirpath=dataset_dirpath, specified_name="TRAFFIC_FEATURES")
-
-    # gdf_traffic_with_wgs84 = convert_epsg_to_wgs84(parsed_gdf_traffic)
-    # traffic_light_locations: list = parse_traffic_light_locations(gdf_traffic_with_wgs84)
-    # for tl in traffic_light_locations:
-    #     print(tl.node_id, tl.coordinates)
-
-    # gdf_after_getting_segment_data, segment_data = get_segment_data(parsed_gdf_road)
-
-    # gdf_with_speed = get_average_speed_by_street(gdf_after_getting_segment_data, headers=USER_HEADERS)
-
-    # gdf_with_weight = get_gdf_with_weight(gdf_with_speed)
-
-    # gdf_with_wgs84 = convert_epsg_to_wgs84(gdf_with_weight)
-
-    # nodes_from_gdf: list[Node] = get_nodes_from_gdf(gdf_with_wgs84)
-    # nodes_from_gdf = build_neighbors_based_on_geometry(gdf_with_wgs84, nodes_from_gdf)
     # node_kdtree = NodeKDTree(nodes_from_gdf)
 
     # address look up
@@ -808,18 +742,7 @@ def main():
     }
 
     # algorithm
-    # top_n_routes = get_top_n_routes(coordinate_details, node_kdtree, top_n=3)
-    # for idx, route in enumerate(top_n_routes, 1):
-    #     print(f"\nRoute #{idx}:")
-    #     print(f"Total time: {route['total_time_hours'] * 60:.2f} minutes")
-    #     print(f"Number of segments: {len(route['path'])}")
-    #     print("Segments:")
 
-    #     for jdx, node in enumerate(route['path'], 1):
-    #         lat, lon = node.coordinates
-    #         print(f"  {jdx}. {node.ename} (ID: {node.street_id}) - Lat: {lat:.6f}, Lon: {lon:.6f}")
-
-    # figure out -99
 
 
 if __name__ == "__main__":
