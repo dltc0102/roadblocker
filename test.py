@@ -11,47 +11,51 @@ from colorama import Fore as CFore
 from colorama import Style as CStyle
 import warnings
 
-def get_osm_shape_dirpath() -> str:
-    matching_folders = glob.glob('planet_*-shp')
-    for folder in matching_folders:
-        if os.path.isdir(folder):
-            return os.path.abspath(folder)
+warnings.filterwarnings("ignore", message="Non closed ring detected", category=RuntimeWarning, module="pyogrio.raw")
 
-def get_shape_dir_files() -> list[str]:
-    dirpath: str = get_osm_shape_dirpath()
-    shape_dir: str = os.path.join(dirpath, 'shape')
-    filepaths = []
-    for filepath in os.listdir(shape_dir):
-        new_filepath = os.path.join(shape_dir, filepath)
-        filepaths.append(new_filepath)
-    return filepaths
+class GDF:
+    def __init__(self, gdf_data, api_key, headers):
+        self.gdf_data = gdf_data
+        self.api_key = api_key
+        self.headers = headers
 
-def get_shapefiles_by_extension(dir_filepaths: list[str], extension: str) -> list[gpd.geodataframe.GeoDataFrame]:
-    gdf_lst = []
-    for filepath in dir_filepaths:
-        if filepath.endswith(extension):
-            gdf = gpd.read_file(filepath)
-            gdf_lst.append(gdf)
+        self.points_gdf = gdf_data['points']
+        self.lines_gdf = gdf_data["lines"]
+        self.mls_gdf = gdf_data["multilinestrings"]
+        self.mpg_gdf = gdf_data["multipolygons"]
+        self.other_gdf = gdf_data["other_relations"]
 
-    return gdf_lst
+        self.point_nodes = []
+        if not self.points_gdf.empty:
+            for idx, point in self.points_gdf.iterrows():
+                self.point_nodes.append(
+                    PointNode(
+                        point["osm_id"], point["name"], point["barrier"], point["highway"], point["ref"], point["address"], point["is_in"], point["place"], point["man_made"], point["other_tags"], point["geometry"]
+                        )
+                    )
 
-class OSMData:
-    def __init__(self, shape_type: str, shp_gdf, dbf_gdf):
-        self.shape_type = shape_type
-        self.shp_gdf = shp_gdf
-        self.dbf_gdf = dbf_gdf
-
-    def _print(self):
-        print(f"self.shape_type: {self.shape_type}")
-
-class RoadNode:
-    def __init__(self, osm_id: int, road_name: str | None, road_type, road_width, road_geometry):
+class PointNode:
+    def __init__(self, osm_id: int, road_name: str | None, barrier, highway, road_ref, address, is_in, place, man_made, other_tags, geometry):
         self.osm_id = osm_id
         self.road_name = road_name
-        self.road_type = road_type
-        self.road_width = road_width
-        self.geometry = road_geometry
+        self.ename = None
+        self.cname = None
+        self.barrier = barrier
+        self.highway = highway
+        self.road_ref = road_ref
+        self.address = address
+        self.is_in = is_in
+        self.place = place
+        self.man_made =man_made
+        self.other_tags = other_tags
+        self.geometry = geometry
         self.wgs84_geometry = self._convert_mls_crs()
+
+        if self.wgs84_geometry:
+            self._print()
+
+    def _print(self):
+        print(f"{self.road_name} {self.wgs84_geometry[0]}")
 
     def _convert_mls_crs(self) -> list[tuple[float, float]]:
         mls_str = self.geometry
@@ -81,38 +85,38 @@ class RoadNode:
 
         return all_coords
 
-def get_osmdata_by_shapetype(all_osm_data, shapetype):
-    for osm_datapart in all_osm_data:
-        if osm_datapart.shape_type == shapetype:
-            return osm_datapart
+def get_pbf_filepath() -> str:
+    file_to_parse = None
+    for filepath in os.listdir(os.getcwd()):
+        if filepath.startswith('hong-kong') and filepath.endswith('.pbf'):
+            file_to_parse = os.path.join(os.getcwd(), filepath)
+    return file_to_parse
+
+def get_all_gdf_data(filepath: str) -> gpd.geodataframe.GeoDataFrame:
+    layers = fiona.listlayers(filepath)
+    gdf_data = {}
+    for layer in layers:
+        layer_gdf = gpd.read_file(filepath, layer=layer)
+        gdf_data[layer] = layer_gdf
+    return gdf_data
+
+def get_gm_api_key() -> str:
+    with open("apikey.txt", 'r', encoding='utf-8') as key_f:
+        return key_f.readline().strip()
 
 def main():
-    shape_dir_files = get_shape_dir_files()
-    shape_types = ["Buildings", "Landuse", "Natural", "Places", "Points", "Railways", "Roads", "Waterways"]
-    hk_shp_gdfs = get_shapefiles_by_extension(shape_dir_files, '.shp')
-    hk_dbf_gdfs = get_shapefiles_by_extension(shape_dir_files, '.dbf')
+    USER_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+    }
+    gm_api_key = get_gm_api_key()
+    pbf_file_path = get_pbf_filepath()
+    gdf_data = get_all_gdf_data(pbf_file_path)
+    GDF(gdf_data, gm_api_key, USER_HEADERS)
 
-    osm_datas = []
-    for shape_type, shp_gdf, dbf_gdf in zip(shape_types, hk_shp_gdfs, hk_dbf_gdfs):
-        osm_datas.append(
-            OSMData(shape_type, shp_gdf, dbf_gdf)
-        )
-    roads_data = get_osmdata_by_shapetype(osm_datas, "Roads")
-    roads_shp = roads_data.shp_gdf
-
-    road_nodes = []
-    for idx, road in roads_shp.iterrows():
-        osm_id = road["osm_id"]
-        road_name = road["name"]
-        road_type = road["type"]
-        road_width = road["width"]
-        road_geometry = road["geometry"]
-        road_nodes.append(
-            RoadNode(osm_id, road_name, road_type, road_width, road_geometry)
-        )
-
-    for road_node in road_nodes:
-        print(road_node.osm_id, len(road_node.wgs84_geometry))
 
 if __name__ == "__main__":
     main()
