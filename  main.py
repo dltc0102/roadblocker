@@ -21,80 +21,6 @@ def remove_filepath(filepath: str) -> None:
         os.remove(filepath)
         print(f"Removed filepath '{filepath}'.")
 
-def get_expressway_limits(headers: dict) -> dict | None:
-    url = "https://en.wikipedia.org/wiki/List_of_streets_and_roads_in_Hong_Kong"
-    res = requests.get(url, headers=headers)
-    res.raise_for_status()
-    if res.status_code != 200:
-        print("url not 200.")
-        return None
-
-    soup = BeautifulSoup(res.content, "html.parser")
-    expressway_table = soup.select_one("table.wikitable.collapsible")
-    expressway_rows = expressway_table.find_all("tr")[1:]
-
-    expressway_limits = {}
-    for row in expressway_rows:
-        cells = row.find_all(['td', 'th'])
-
-        if len(cells) >= 3:
-            # Get expressway name
-            name_cell = cells[0]
-            name_link = name_cell.find('a', title=True)
-            expressway_name = name_link.get_text(strip=True) if name_link else name_cell.get_text(strip=True)
-
-            # Get speed limit with regex to handle various formats
-            speed_text = cells[2].get_text(strip=True)
-
-            # Find all numbers in the speed limit text
-            numbers = re.findall(r'\d+', speed_text)
-
-            if numbers:
-                if len(numbers) == 1:
-                    speed_limit = int(numbers[0])
-                else:
-                    # Multiple numbers found, create tuple
-                    speed_limit = tuple(int(num) for num in numbers)
-
-                expressway_limits[expressway_name] = speed_limit
-
-    return expressway_limits
-
-def convert_epsg_to_wgs84(gdf: gpd.geodataframe.GeoDataFrame):
-    # GDF CRS: EPSG:2326
-    # WGS84 CRS: EPSG:4326
-
-    new_gdf = gdf.copy()
-    crs_transformer = Transformer.from_crs("EPSG:2326", "EPSG:4326", always_xy=True)
-
-    coords_list = []
-    for idx, street in new_gdf.iterrows():
-        geom = street["geometry"]
-
-        if geom.geom_type == 'Point':
-            start_e, start_n = geom.coords[0]
-        elif geom.geom_type in ['LineString', 'MultiLineString']:
-            if geom.geom_type == 'MultiLineString':
-                start_e, start_n = tuple((geom.geoms[0]).coords[0])
-            else:
-                start_e, start_n = geom.coords[0]
-        else:
-            start_e, start_n = (None, None)
-
-        if start_e is not None and start_n is not None:
-            lon, lat = crs_transformer.transform(start_e, start_n)
-            coords_list.append((lat, lon))
-        else:
-            coords_list.append(None)
-
-    new_gdf["coords"] = coords_list
-    print(f"GDF: EPSG:2326 converted to WGS84 for gdf.")
-    return new_gdf
-
-def contains_chinese(foo: str) -> bool:
-    chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
-    return bool(chinese_pattern.search(foo))
-
 def color_msg(color, msg):
     colors = {
         'red': CFore.RED,
@@ -107,6 +33,10 @@ def color_msg(color, msg):
         'white': CFore.WHITE
     }
     return f"{colors[color.lower()]}{msg}{CStyle.RESET_ALL}"
+
+def get_gm_api_key() -> str:
+    with open("apikey.txt", 'r', encoding='utf-8') as key_f:
+        return key_f.readline().strip()
 
 
 
@@ -133,7 +63,7 @@ def get_latest_road_network(input_dirpath: str) -> None:
 
     os.remove(dataset_zip_path)
 
-def parse_gdb_files(input_dirpath: str, headers: dict, specified_name="CENTERLINE") -> gpd.geodataframe.GeoDataFrame:
+def get_all_gdf_data(input_dirpath: str, headers: dict) -> gpd.geodataframe.GeoDataFrame:
     gdb_dirs: list = [file for file in os.listdir(input_dirpath) if file.endswith('.gdb')]
     if not gdb_dirs:
         raise FileNotFoundError("No GDB directory found in the dataset folder")
@@ -142,13 +72,14 @@ def parse_gdb_files(input_dirpath: str, headers: dict, specified_name="CENTERLIN
     gdb_filepath    : str = os.path.join(input_dirpath, gdb_dir)
     layers          : list = fiona.listlayers(gdb_filepath)
     layer_wanted    : str = None
-    for layer in layers:
-        if layer == specified_name:
-            layer_wanted = layer
+    # print(layers)
 
-    gdf: gpd.geodataframe.GeoDataFrame = gpd.read_file(gdb_filepath, layer=layer_wanted)
-    print(f"Found {len(gdf)} road segments for gdf")
-    return gdf
+    gdf_data = {}
+    for layer in layers:
+        layer_gdf: gpd.geodataframe.GeoDataFrame = gpd.read_file(gdb_filepath, layer=layer)
+        gdf_data[layer] = layer_gdf
+
+    return gdf_data
 
 # def get_average_speed_by_street(gdf: gpd.geodataframe.GeoDataFrame, headers: dict) -> gpd.geodataframe.GeoDataFrame | None:
 #     new_gdf = gdf.copy()
@@ -179,32 +110,17 @@ def parse_gdb_files(input_dirpath: str, headers: dict, specified_name="CENTERLIN
 #     return new_gdf
 
 # def get_gdf_with_weight(gdf: gpd.geodataframe.GeoDataFrame) -> gpd.geodataframe.GeoDataFrame:
-    new_gdf = gdf.copy()
-    new_gdf["weight"] = 0.0
+    # new_gdf = gdf.copy()
+    # new_gdf["weight"] = 0.0
 
-    for idx, street in new_gdf.iterrows():
-        street_ave_speed = float(street["average_speed"]) # km/hr
-        street_length_km = float(street["SHAPE_Length"] / 1000)
-        weight: float = street_length_km / street_ave_speed
-        new_gdf.at[idx, "weight"] = weight
+    # for idx, street in new_gdf.iterrows():
+    #     street_ave_speed = float(street["average_speed"]) # km/hr
+    #     street_length_km = float(street["SHAPE_Length"] / 1000)
+    #     weight: float = street_length_km / street_ave_speed
+    #     new_gdf.at[idx, "weight"] = weight
 
-    print("GDF: Node's Weight column added. (time in hours)")
-    return new_gdf
-
-def get_nodes_from_gdf(gdf: gpd.geodataframe.GeoDataFrame) -> list:
-    new_gdf = gdf.copy()
-    gdf_nodes = []
-
-    for idx, street in new_gdf.iterrows():
-        street_ename = street["STREET_ENAME"]
-        street_id = street["ROUTE_ID"]
-        street_coords = street["coords"]
-        street_weight = street["weight"]
-        street_node = Node(street_ename, street_id, street_coords, street_weight)
-        gdf_nodes.append(street_node)
-
-    print("GDF: Retrieved all nodes from gdf.")
-    return gdf_nodes
+    # print("GDF: Node's Weight column added. (time in hours)")
+    # return new_gdf
 
 
 
@@ -311,10 +227,6 @@ def get_coordinate_details(start_details: dict, end_details: dict):
         "end": (float(end_details["lat"]), float(end_details["lon"])),
     }
 
-def get_gm_api_key() -> str:
-    with open("apikey.txt", 'r', encoding='utf-8') as key_f:
-        return key_f.readline().strip()
-
 class GMAddress:
     def __init__(self, api_key: str, long_name: str, short_name: str, road_type: str, category: str, coords: tuple[float, float]):
         self.api_key = api_key
@@ -355,8 +267,9 @@ class GMAddress:
         return elevation
 
 class Node:
-    def __init__(self, api_key: str, ename: str, cname: str, elevation: int, st_code: float, exit_num: int | None, route_num: int | None, remarks: str | None, route_id: int, travel_direction: int, cre_date: str, last_upd_date_v: str, alias_ename: str | None, alias_cname: str | None, shape_length: float, geometry: shapely_mls.MultiLineString, speed_limit: int):
+    def __init__(self, api_key: str, request_headers: dict, ename: str, cname: str, elevation: int, st_code: float, exit_num: int | None, route_num: int | None, remarks: str | None, route_id: int, travel_direction: int, cre_date: str, last_upd_date_v: str, alias_ename: str | None, alias_cname: str | None, shape_length: float, geometry: shapely_mls.MultiLineString, speed_limit: int):
         self.api_key                : str = api_key
+        self.request_headers        : dict = request_headers
         self.ename                  : str = self._regulate_dashes(ename)
         self.cname                  : str = self._regulate_dashes(cname)
         self.elevation              : int = elevation
@@ -366,6 +279,8 @@ class Node:
         self.remarks                : str | None = remarks
         self.route_id               : int = route_id
         self.travel_direction       : int = travel_direction
+        # if travel_direction == 1: two way
+        # if travel_direction == 3: one way
         self.cre_date               : str = cre_date
         self.last_upd_date_v        : str = last_upd_date_v
         self.alias_ename            : str | None = alias_ename
@@ -374,10 +289,10 @@ class Node:
         self.shape_length_km        : float = self.shape_length / 1000
         self.geometry               : shapely_mls.MultiLineString = geometry
         self.speed_limit            : int = speed_limit
-        self.average_speed          : float = float(self.speed_limit * 0.9)
+        self.average_speed          : float = None
         self.wgs84_geometry         : list[tuple] = self._convert_mls_crs()
         self.geometry_start_point   : tuple = self.wgs84_geometry[0]
-        self.heuristic              : float = self.shape_length_km / 110.0
+        self.weight                 : float = self.shape_length_km / self.average_speed
         self.road_category          : str = ""
         self.road_type              : str = ""
         self.node_dict              : dict = None
@@ -392,8 +307,21 @@ class Node:
         else:
             self._print()
 
-        if self.ename != '-99' and self.ename != None and self.ename != '' and  self.road_category != "" and self.road_type != '':
+        if not self._is_valid_ename() and self.road_category != "" and self.road_type != '':
             self.create_node_dict()
+
+        if self._is_valid_ename() and self.speed_limit is None:
+            express_way_limits: dict = self.get_expressway_limits()
+            if self.ename in express_way_limits:
+                self.speed_limit = express_way_limits[self.ename]
+            else:
+                self.speed_limit = 50
+
+        if self.speed_limit is not None:
+            self.average_speed = float(self.speed_limit * 0.9)
+
+    def _is_valid_ename(self) -> bool:
+        return (self.ename != '-99' or self.ename != None or not '-' in self.ename or self.ename != '' or self.ename != ' ')
 
     def create_node_dict(self) -> dict:
         return {
@@ -415,7 +343,7 @@ class Node:
             "speed_limit": self.speed_limit,
             "average_speed": self.average_speed,
             "geometry_start_point": self.geometry_start_point,
-            "heuristic": self.heuristic,
+            "weight": self.weight,
             "road_category": self.road_category,
             "road_type": self.road_type
         }
@@ -492,6 +420,38 @@ class Node:
             return parts[0] if parts else ""
         return text.strip()
 
+    def get_expressway_limits(self) -> dict | None:
+        url = "https://en.wikipedia.org/wiki/List_of_streets_and_roads_in_Hong_Kong"
+        res = requests.get(url, headers=self.request_headers)
+        res.raise_for_status()
+        if res.status_code != 200:
+            print("url not 200.")
+            return None
+
+        soup = BeautifulSoup(res.content, "html.parser")
+        expressway_table = soup.select_one("table.wikitable.collapsible")
+        expressway_rows = expressway_table.find_all("tr")[1:]
+
+        expressway_limits = {}
+        for row in expressway_rows:
+            cells = row.find_all(['td', 'th'])
+
+            if len(cells) >= 3:
+                name_cell = cells[0]
+                name_link = name_cell.find('a', title=True)
+                expressway_name = name_link.get_text(strip=True) if name_link else name_cell.get_text(strip=True)
+                speed_text = cells[2].get_text(strip=True)
+                numbers = re.findall(r'\d+', speed_text)
+                if numbers:
+                    if len(numbers) == 1:
+                        speed_limit = int(numbers[0])
+                    else:
+                        speed_limit = tuple(int(num) for num in numbers)
+
+                    expressway_limits[expressway_name] = speed_limit
+
+        return expressway_limits
+
     def osm_reverse_lookup(self, coord_tuple: tuple[float, float]) -> json:
         NOMINATIM_HEADERS = {
             "User-Agent": "Roadblocker/1.0 (daniellautc@gmail.com)"
@@ -537,7 +497,7 @@ class Node:
             return "No results found for these coordinates."
         return reverse_geocode_result
 
-    def get_gm_address(self) -> str | None:
+    def gm_address_lookup(self) -> GMAddress | None:
         results = self.gm_reverse_lookup(self.geometry_start_point)
         gm_address_nodes = []
         for result in results:
@@ -556,7 +516,6 @@ class Node:
                     gm_address_nodes.append(
                         GMAddress(self.api_key, long_name, short_name, comp_type, self.road_category, coordinates)
                     )
-
         valid_nodes = [node for node in gm_address_nodes if node.elevation is not None]
 
         if not valid_nodes:
@@ -664,31 +623,94 @@ class Node:
 
             else:
                 print("using gm api")
-                gm_address = self.get_gm_address()
+                gm_address = self.gm_address_lookup()
                 if gm_address:
                     print(f"gm api: {gm_address.long_name}, {gm_address.short_name}")
                     self.ename = gm_address.long_name
-
-                    if self._is_text_chinese(gm_address.short_name):
-                        self.cname = gm_address.short_name
-                    else:
-                        self.cname = self.get_chinese_address_name(gm_address.long_name)
+                    self.cname = gm_address.short_name
                     self._print("yellow")
                     return
+        print(color_msg("blue", "all streets corrected"))
 
 
-            # self.ename = ename
-            # self.cname = cname
-        # self._print("red")
-        #     if ename == None or ename == "" or ename == " ":
-        #         gm_reverse_result = gm_reverse_lookup(self.geometry_start_point)
-        #         print(gm_reverse_result)
-        #         return
+"""--------------
+   NODE KDTREE
+--------------"""
+class NODEKDTree:
+    def __init__(self, ename, cname, shape_length_km, average_speed, speed_limit, node_weight, wgs84_coords):
+        self.ename = ename
+        self.cname = cname
+        self.shape_length_km = shape_length_km
+        self.average_speed = average_speed
+        self.speed_limit = speed_limit
+        self.node_weight = node_weight
+        self.wgs84_coords = wgs84_coords
 
-        # self._print("red")
+class GDF:
+    def __init__(self, all_gdf_data, gm_api_key, request_headers):
+        self.gm_api_key = gm_api_key
+        self.all_gdf_data = all_gdf_data
+        self.request_headers = request_headers
+
+        self.vehicle_restriciton_layer = self.all_gdf_data.get("VEHICLE_RESTRICTION", gpd.GeoDataFrame())
+        self.traffic_features_layer = self.all_gdf_data.get("TRAFFIC_FEATURES", gpd.GeoDataFrame())
+        self.speed_limit_layer = self.all_gdf_data.get("SPEED_LIMIT", gpd.GeoDataFrame())
+        self.run_in_out_layer = self.all_gdf_data.get("RUN_IN_OUT", gpd.GeoDataFrame())
+        self.roundabout_layer = self.all_gdf_data.get("ROUNDABOUT", gpd.GeoDataFrame())
+        self.prohibition_layer = self.all_gdf_data.get("PROHIBITION", gpd.GeoDataFrame())
+        self.permit_layer = self.all_gdf_data.get("PERMIT", gpd.GeoDataFrame())
+        self.pedestrian_zone_layer = self.all_gdf_data.get("PEDESTRIAN_ZONE", gpd.GeoDataFrame())
+        self.nsr_layer = self.all_gdf_data.get("NSR", gpd.GeoDataFrame())
+        self.bus_only_lane_layer = self.all_gdf_data.get("BUS_ONLY_LANE", gpd.GeoDataFrame())
+        self.centerline_layer = self.all_gdf_data.get("CENTERLINE", gpd.GeoDataFrame())
+        self.turn_layer = self.all_gdf_data.get("TURN", gpd.GeoDataFrame())
+        self.intersection_layer = self.all_gdf_data.get("INTERSECTION", gpd.GeoDataFrame())
+        self.tun_bridge_toll_layer = self.all_gdf_data.get("TUN_BRIDGE_TOLL", gpd.GeoDataFrame())
+        self.onstreetpark_layer = self.all_gdf_data.get("ONSTREETPARK", gpd.GeoDataFrame())
+        self.gisp_on_street_parking_layer = self.all_gdf_data.get("GISP_ON_STREET_PARKING", gpd.GeoDataFrame())
+        self.tun_bridge_tv_toll_layer = self.all_gdf_data.get("TUN_BRIDGE_TV_TOLL", gpd.GeoDataFrame())
+
+        self.centerline_nodes = []
+        self.centerline_node_dicts = []
+        if not self.centerline_layer.empty:
+            for idx, street in self.centerline_layer.iterrows():
+                street_rd_id = street["ROUTE_ID"]
+                speed_limit = self.search_within_layer(
+                    self.speed_limit_layer,
+                    "ROAD_ROUTE_ID",
+                    street_rd_id,
+                    "SPEED_LIMIT"
+                )
+                self.centerline_nodes.append(
+                    Node(
+                        self.gm_api_key, self.request_headers, street["STREET_ENAME"], street["STREET_CNAME"], street["ELEVATION"], street["ST_CODE"], street["EXIT_NUM"], street["ROUTE_NUM"], street["REMARKS"], street["ROUTE_ID"], street["TRAVEL_DIRECTION"], street["CRE_DATE"], street["LAST_UPD_DATE_V"], street["ALIAS_ENAME"], street["ALIAS_CNAME"], street["SHAPE_Length"], street["geometry"], speed_limit
+                    )
+                )
+
+        if not self.centerline_nodes == []:
+            for node in self.centerline_nodes:
+                self.centerline_node_dicts.append(node.get_node_dict())
+
+        if not self.centerline_node_dicts == []:
+            ctl_node_json = "centerline_nodes.json"
+            remove_filepath(ctl_node_json)
+            with open(ctl_node_json, 'w', encoding='utf-8') as nodes_f:
+                json.dump(self.centerline_node_dicts, nodes_f, ensure_ascii=False, indent=2, default=str)
+
+    def search_within_layer(self, gdf_layer, search_column, search_value, return_column=None):
+        if gdf_layer.empty:
+            return None
+
+        matches = gdf_layer[gdf_layer[search_column] == search_value]
+        if matches.empty:
+            return None
+
+        if return_column:
+            return matches[return_column].iloc[0]
+        else:
+            return matches.iloc[0]
 
 def main():
-
     # gdf stuff
     USER_HEADERS = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
@@ -700,30 +722,8 @@ def main():
     dataset_dirpath: str = get_dataset_dirpath()
     gm_api_key: str = get_gm_api_key()
     get_latest_road_network(input_dirpath=dataset_dirpath)
-
-    parsed_gdf_road = parse_gdb_files(dataset_dirpath, USER_HEADERS, "CENTERLINE")
-
-    gdf_nodes = []
-    for idx, street in parsed_gdf_road.iterrows():
-        street_ename = street["STREET_ENAME"]
-        expressway_limits = get_expressway_limits(USER_HEADERS)
-        speed_limit = 50
-        if street_ename in expressway_limits:
-            speed_limit = expressway_limits[street_ename]
-
-        gdf_nodes.append(Node(gm_api_key, street_ename, street["STREET_CNAME"], street["ELEVATION"], street["ST_CODE"], street["EXIT_NUM"], street["ROUTE_NUM"], street["REMARKS"], street["ROUTE_ID"], street["TRAVEL_DIRECTION"], street["CRE_DATE"], street["LAST_UPD_DATE_V"], street["ALIAS_ENAME"], street["ALIAS_CNAME"], street["SHAPE_Length"], street["geometry"], speed_limit))
-
-    gdf_node_dicts = []
-    for gdf_node in gdf_nodes:
-        gdf_node_dicts.append(gdf_node.get_node_dict())
-
-    remove_filepath('gdf_nodes.json')
-    with open('gdf_nodes.json', 'w', encoding='utf-8') as nodes_f:
-        json.dump(gdf_node_dicts, nodes_f, ensure_ascii=False, indent=2, default=str)
-
-    print("added all gdf_nodes' data to gdf_nodes.json")
-
-    # node_kdtree = NodeKDTree(nodes_from_gdf)
+    all_gdf_data = get_all_gdf_data(dataset_dirpath, USER_HEADERS)
+    GDF(all_gdf_data, gm_api_key, USER_HEADERS)
 
     # address look up
     start_address: str = "2 lung pak street"
