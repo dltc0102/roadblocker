@@ -1,6 +1,7 @@
 # Program goal: Find the top N fastest routes between two points
 
-import os, zipfile, fiona, json, requests, re, time, math, googlemaps, heapq
+import os, zipfile, fiona, json, requests, re, time, math, googlemaps, heapq, shutil
+import shapely.geometry as geometry
 import shapely.geometry.multilinestring as shapely_mls
 from pyproj import Transformer
 from bs4 import BeautifulSoup
@@ -10,16 +11,27 @@ from scipy.spatial import cKDTree
 import numpy as np
 from colorama import Fore as CFore
 from colorama import Style as CStyle
+import warnings
 
-
+# remove weird pyogrio warnings
+warnings.filterwarnings(
+    "ignore",
+    message="Measured.*geometry types are not supported",
+    category=UserWarning,
+    module="pyogrio.raw"
+)
 
 """----------
     UTILS
 ----------"""
 def remove_filepath(filepath: str) -> None:
     if os.path.exists(filepath):
-        os.remove(filepath)
-        print(f"Removed filepath '{filepath}'.")
+        if os.path.isfile(filepath):
+            os.remove(filepath)
+            print(f"Removed filepath '{filepath}'.")
+        if os.path.isdir(filepath):
+            shutil.rmtree(filepath)
+            print(f"Removed directory '{filepath}'.")
 
 def color_msg(color, msg):
     colors = {
@@ -121,33 +133,6 @@ def get_all_gdf_data(input_dirpath: str, headers: dict) -> gpd.geodataframe.GeoD
 
     # print("GDF: Node's Weight column added. (time in hours)")
     # return new_gdf
-
-
-
-"""--------------
-   TRAFFIC GDF
---------------"""
-class TrafficLightNode:
-    def __init__(self, node_id, node_type, geometry, coords):
-        self.node_id = node_id
-        self.node_type = node_type
-        self.coordinates = coords
-
-    def _print(self):
-        print(f"{self.node_id} ({self.node_type}): {self.coordinates}")
-
-def parse_traffic_light_locations(gdf: gpd.geodataframe.GeoDataFrame) -> list[TrafficLightNode]:
-    traffic_light_nodes = []
-    for idx, street in gdf.iterrows():
-        traffic_light_nodes.append(
-            TrafficLightNode(
-                node_id=street["FEATURE_ID"],
-                node_type=street["FEATURE_TYPE"],
-                geometry=street["geometry"],
-                coords=street["coords"]
-            )
-        )
-    return traffic_light_nodes
 
 
 
@@ -288,11 +273,11 @@ class Node:
         self.shape_length           : float = shape_length
         self.shape_length_km        : float = self.shape_length / 1000
         self.geometry               : shapely_mls.MultiLineString = geometry
-        self.speed_limit            : int = speed_limit
+        self.speed_limit            : float | None = speed_limit
         self.average_speed          : float = None
         self.wgs84_geometry         : list[tuple] = self._convert_mls_crs()
         self.geometry_start_point   : tuple = self.wgs84_geometry[0]
-        self.weight                 : float = self.shape_length_km / self.average_speed
+        self.weight                 : float = 0.0
         self.road_category          : str = ""
         self.road_type              : str = ""
         self.node_dict              : dict = None
@@ -307,18 +292,19 @@ class Node:
         else:
             self._print()
 
-        if not self._is_valid_ename() and self.road_category != "" and self.road_type != '':
-            self.create_node_dict()
-
         if self._is_valid_ename() and self.speed_limit is None:
             express_way_limits: dict = self.get_expressway_limits()
             if self.ename in express_way_limits:
-                self.speed_limit = express_way_limits[self.ename]
+                self.speed_limit: float = float(max(express_way_limits[self.ename]))
             else:
-                self.speed_limit = 50
+                self.speed_limit: float = 50.0
 
         if self.speed_limit is not None:
-            self.average_speed = float(self.speed_limit * 0.9)
+            self.average_speed: float = float(self.speed_limit * 0.9)
+            self.weight: float = self.shape_length_km / self.average_speed
+
+        if not self._is_valid_ename() and self.road_category != "" and self.road_type != '' and self.speed_limit is not None:
+            self.create_node_dict()
 
     def _is_valid_ename(self) -> bool:
         return (self.ename != '-99' or self.ename != None or not '-' in self.ename or self.ename != '' or self.ename != ' ')
@@ -593,7 +579,6 @@ class Node:
         return elevation
 
     def correct_street_names(self):
-        print("using correct_street_names()")
         print(f"current names: {self.ename}, {self.cname}, {self.geometry_start_point}")
         osm_reverse_result = self.osm_reverse_lookup(self.geometry_start_point)
         used_gmaps = False
@@ -601,7 +586,6 @@ class Node:
         new_ename = None
         new_cname = None
         if osm_reverse_result:
-            print("using osm api")
             self.road_category = osm_reverse_result["category"]
             self.road_type = osm_reverse_result["addresstype"]
             try:
@@ -609,7 +593,7 @@ class Node:
             except KeyError:
                 address_name: str = osm_reverse_result["name"]
 
-            print(f"address_name: {address_name}")
+            print(f"osm address_name: {address_name}")
             new_ename, new_cname = self.get_lang_names_v4(address_name)
             print(f"osm api: {new_ename}, {new_cname}")
             if new_ename != "" and new_cname != "":
@@ -622,7 +606,6 @@ class Node:
                 return
 
             else:
-                print("using gm api")
                 gm_address = self.gm_address_lookup()
                 if gm_address:
                     print(f"gm api: {gm_address.long_name}, {gm_address.short_name}")
@@ -632,19 +615,104 @@ class Node:
                     return
         print(color_msg("blue", "all streets corrected"))
 
+class IntersectionNode:
+    def __init__(self, cre_date: str, int_id: str, int_type: int, int_ename: str, int_cname: str, rd_id_lst: list, remarks: str, last_upd_date_v: str, int_shape: geometry):
+        self.cre_date = cre_date
+        self.int_id = int_id
+        self.int_type = int_type
+        # 0: others (default)
+        # 1: signalized junction
+        self.int_ename = int_ename
+        self.int_cname = int_cname
+        self.rd_id_lst = rd_id_lst
+        self.rd_id_1 = rd_id_lst[0] or None
+        self.rd_id_2 = rd_id_lst[1] or None
+        self.rd_id_3 = rd_id_lst[2] or None
+        self.rd_id_4 = rd_id_lst[3] or None
+        self.rd_id_5 = rd_id_lst[4] or None
+        self.rd_id_6 = rd_id_lst[5] or None
+        self.rd_id_7 = rd_id_lst[6] or None
+        self.rd_id_8 = rd_id_lst[7] or None
+        self.rd_id_9 = rd_id_lst[8] or None
+        self.rd_id_10 = rd_id_lst[9] or None
+        self.last_upd_date_v = last_upd_date_v
+        self.int_shape = int_shape
 
-"""--------------
-   NODE KDTREE
---------------"""
-class NODEKDTree:
-    def __init__(self, ename, cname, shape_length_km, average_speed, speed_limit, node_weight, wgs84_coords):
-        self.ename = ename
-        self.cname = cname
-        self.shape_length_km = shape_length_km
-        self.average_speed = average_speed
-        self.speed_limit = speed_limit
-        self.node_weight = node_weight
-        self.wgs84_coords = wgs84_coords
+class RoundaboutNode:
+    def __init__(self, rdb_shape: geometry, cre_date: str, rbd_id: int, rdb_ename: str, rdb_cname: str, rdb_type: int, rdb_graded: str, signalized: str, arm_num: int, rd_id_lst: list, remarks: str, last_upd_date_v: str):
+        self.rdb_shape = rdb_shape
+        self.cre_date = cre_date
+        self.rbd_id = rbd_id
+        self.rdb_ename = rdb_ename
+        self.rdb_cname = rdb_cname
+        self.rdb_type = rdb_type
+        #: 1: typical roundabouts
+        #: 2: Mini roundabouts (radius of center < 2meters)
+        #: 3: Double Roundabouts
+        #: 4: others
+        #: 5: Spiral Roudabouts
+        self.rdb_graded = rdb_graded
+        self.signalized = signalized
+        self.arm_num = arm_num
+        self.rd_id_lst = rd_id_lst
+        self.rd_id_1 = rd_id_lst[0] or None
+        self.rd_id_2 = rd_id_lst[1] or None
+        self.rd_id_3 = rd_id_lst[2] or None
+        self.rd_id_4 = rd_id_lst[3] or None
+        self.rd_id_5 = rd_id_lst[4] or None
+        self.rd_id_6 = rd_id_lst[5] or None
+        self.rd_id_7 = rd_id_lst[6] or None
+        self.rd_id_8 = rd_id_lst[7] or None
+        self.rd_id_9 = rd_id_lst[8] or None
+        self.rd_id_10 = rd_id_lst[9] or None
+        self.remarks = remarks
+        self.last_upd_date_v = last_upd_date_v
+
+class TrafficNode:
+    def __init__(self, shape: geometry, feature_type: int, feature_id: int, cre_date: str, rd_id_lst: list, remarks: str, tun_bridge_id: int, last_upd_date_v: str):
+        self.tf_shape = shape
+        self.tf_type = feature_type
+        self.tf_id = feature_id
+        self.cre_date = cre_date
+        self.rd_id_lst = rd_id_lst
+        self.rd_id_1 = rd_id_lst[0] or None
+        self.rd_id_2 = rd_id_lst[1] or None
+        self.rd_id_3 = rd_id_lst[2] or None
+        self.rd_id_4 = rd_id_lst[3] or None
+        self.rd_id_5 = rd_id_lst[4] or None
+        self.rd_id_6 = rd_id_lst[5] or None
+        self.rd_id_7 = rd_id_lst[6] or None
+        self.rd_id_8 = rd_id_lst[7] or None
+        self.rd_id_9 = rd_id_lst[8] or None
+        self.remarks = remarks
+        self.tun_bridge_id = tun_bridge_id
+        self.last_upd_date_v = last_upd_date_v
+
+class BusOnlyNode:
+    def __init__(self, road_route_id: int, time_zone: str, effective_day: str, bound: int, remarks: str, lane_id: int, cre_date: str, last_upd_date_v: str, shape: geometry, shape_length: float):
+        self.route_id = road_route_id
+        self.time_zone = time_zone
+        self.effective_day = effective_day
+        self.bound = bound
+        self.remarks = remarks
+        self.lane_id = lane_id
+        self.cre_date = cre_date
+        self.last_upd_date_v = last_upd_date_v
+        self.bo_shape = shape
+        self.bo_length = shape_length
+
+class TunnelBridgeNode:
+    def __init__(self, tunbri_ename: str, tunbri_cname: str, tunbri_id1: int, tunbri_id2: int, effective_date: str, gazetted_toll: float, concession_toll: float, vehicle_desc: str, remarks: str, last_updated_date: str):
+        self.ename = tunbri_ename
+        self.cname = tunbri_cname
+        self.id1 = tunbri_id1
+        self.id2 = tunbri_id2
+        self.effective_date = effective_date
+        self.gazetted_toll = gazetted_toll
+        self.concession_toll = concession_toll
+        self.vehicle_desc = vehicle_desc
+        self.remarks = remarks
+        self.last_updated_date = last_updated_date
 
 class GDF:
     def __init__(self, all_gdf_data, gm_api_key, request_headers):
@@ -670,20 +738,27 @@ class GDF:
         self.gisp_on_street_parking_layer = self.all_gdf_data.get("GISP_ON_STREET_PARKING", gpd.GeoDataFrame())
         self.tun_bridge_tv_toll_layer = self.all_gdf_data.get("TUN_BRIDGE_TV_TOLL", gpd.GeoDataFrame())
 
+        """ GDF DATA DIR """
+        self.gdf_data_dir = os.path.join(os.getcwd(), "gdf_data_dir")
+        remove_filepath(self.gdf_data_dir)
+        os.mkdir(self.gdf_data_dir)
+
+        """ CENTERLINE NODES """
         self.centerline_nodes = []
         self.centerline_node_dicts = []
         if not self.centerline_layer.empty:
             for idx, street in self.centerline_layer.iterrows():
                 street_rd_id = street["ROUTE_ID"]
-                speed_limit = self.search_within_layer(
+                found_speed_limit = self.search_within_layer(
                     self.speed_limit_layer,
                     "ROAD_ROUTE_ID",
                     street_rd_id,
                     "SPEED_LIMIT"
                 )
+
                 self.centerline_nodes.append(
                     Node(
-                        self.gm_api_key, self.request_headers, street["STREET_ENAME"], street["STREET_CNAME"], street["ELEVATION"], street["ST_CODE"], street["EXIT_NUM"], street["ROUTE_NUM"], street["REMARKS"], street["ROUTE_ID"], street["TRAVEL_DIRECTION"], street["CRE_DATE"], street["LAST_UPD_DATE_V"], street["ALIAS_ENAME"], street["ALIAS_CNAME"], street["SHAPE_Length"], street["geometry"], speed_limit
+                        self.gm_api_key, self.request_headers, street["STREET_ENAME"], street["STREET_CNAME"], street["ELEVATION"], street["ST_CODE"], street["EXIT_NUM"], street["ROUTE_NUM"], street["REMARKS"], street["ROUTE_ID"], street["TRAVEL_DIRECTION"], street["CRE_DATE"], street["LAST_UPD_DATE_V"], street["ALIAS_ENAME"], street["ALIAS_CNAME"], street["SHAPE_Length"], street["geometry"], found_speed_limit
                     )
                 )
 
@@ -692,12 +767,12 @@ class GDF:
                 self.centerline_node_dicts.append(node.get_node_dict())
 
         if not self.centerline_node_dicts == []:
-            ctl_node_json = "centerline_nodes.json"
+            ctl_node_json = os.path.join(self.gdf_data_dir, "centerline_nodes.json")
             remove_filepath(ctl_node_json)
             with open(ctl_node_json, 'w', encoding='utf-8') as nodes_f:
                 json.dump(self.centerline_node_dicts, nodes_f, ensure_ascii=False, indent=2, default=str)
 
-    def search_within_layer(self, gdf_layer, search_column, search_value, return_column=None):
+    def search_within_layer(self, gdf_layer, search_column, search_value, return_column=None) -> float | None:
         if gdf_layer.empty:
             return None
 
@@ -705,10 +780,14 @@ class GDF:
         if matches.empty:
             return None
 
+        text_result: str = None
         if return_column:
-            return matches[return_column].iloc[0]
+            text_result = matches[return_column].iloc[0]
         else:
-            return matches.iloc[0]
+            text_result = matches.iloc[0]
+
+        result = float(text_result.replace("km/h", "").strip())
+        return result
 
 def main():
     # gdf stuff
