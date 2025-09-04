@@ -168,11 +168,12 @@ def get_all_gdf_data(filepath: str, specified_layer=None) -> gpd.geodataframe.Ge
     return gdf_data
 
 class OSM_GDF:
-    def __init__(self, gdf_data, api_key, headers, gov_gdf):
+    def __init__(self, gdf_data, api_key, headers, gov_gdf, expressway_limits):
         self.gdf_data = gdf_data
         self.api_key = api_key
         self.headers = headers
         self.gov_gdf = gov_gdf
+        self.expressway_limits = expressway_limits
 
         self.points_gdf = gdf_data['points']
         self.lines_gdf = gdf_data["lines"]
@@ -188,7 +189,7 @@ class OSM_GDF:
                 if line["name"] != None:
                     self.lines_nodes.append(
                         OSM_LineNode(
-                            self.api_key, self.headers, self.gov_gdf, line["osm_id"], line["name"], line["highway"], line["waterway"], line["aerialway"], line["barrier"], line["man_made"], line["railway"], line["z_order"], line["other_tags"], line["geometry"]
+                            self.api_key, self.headers, self.gov_gdf, self.expressway_limits, line["osm_id"], line["name"], line["highway"], line["waterway"], line["aerialway"], line["barrier"], line["man_made"], line["railway"], line["z_order"], line["other_tags"], line["geometry"]
                         )
                     )
             print("All Line Nodes Created.")
@@ -246,10 +247,11 @@ class OSM_GDF:
         return bool(chinese_pattern.search(text))
 
 class OSM_LineNode:
-    def __init__(self, api_key, headers, gov_gdf, osm_id: int, name: str, highway: str, waterway: str, aerialway: str, barrier: str, man_made: str, railway: str, z_order: int, other_tags, geometry):
+    def __init__(self, api_key, headers, gov_gdf, expressway_limits, osm_id: int, name: str, highway: str, waterway: str, aerialway: str, barrier: str, man_made: str, railway: str, z_order: int, other_tags, geometry):
         self.api_key = api_key
         self.headers = headers
         self.gov_gdf = gov_gdf
+        self.expressway_limits = expressway_limits
 
         self.osm_id = osm_id
         self.name = name
@@ -301,38 +303,6 @@ class OSM_LineNode:
 
         if self.avespeed != 0.0 and self.line_distance_km != None:
             self.weight = self.line_distance_km / self.avespeed
-
-    def get_expressway_limits(self) -> dict | None:
-        url = "https://en.wikipedia.org/wiki/List_of_streets_and_roads_in_Hong_Kong"
-        res = requests.get(url, headers=self.headers)
-        res.raise_for_status()
-        if res.status_code != 200:
-            print("url not 200.")
-            return None
-
-        soup = BeautifulSoup(res.content, "html.parser")
-        expressway_table = soup.select_one("table.wikitable.collapsible")
-        expressway_rows = expressway_table.find_all("tr")[1:]
-
-        expressway_limits = {}
-        for row in expressway_rows:
-            cells = row.find_all(['td', 'th'])
-
-            if len(cells) >= 3:
-                name_cell = cells[0]
-                name_link = name_cell.find('a', title=True)
-                expressway_name = name_link.get_text(strip=True) if name_link else name_cell.get_text(strip=True)
-                speed_text = cells[2].get_text(strip=True)
-                numbers = re.findall(r'\d+', speed_text)
-                if numbers:
-                    if len(numbers) == 1:
-                        speed_limit = float(numbers[0])
-                    else:
-                        speed_limit = float(max(numbers))
-
-                    expressway_limits[expressway_name] = speed_limit
-
-        return expressway_limits
 
     def convert_mls(self, giv_geometry) -> list[tuple[float, float]]:
         if isinstance(giv_geometry, MultiLineString):
@@ -448,6 +418,38 @@ def get_latest_road_network(dataset_filepath: str) -> str:
     print("Road network dataset downloaded and extracted.")
     return gdb_filepath
 
+def get_expressway_limits(self) -> dict | None:
+    url = "https://en.wikipedia.org/wiki/List_of_streets_and_roads_in_Hong_Kong"
+    res = requests.get(url, headers=self.headers)
+    res.raise_for_status()
+    if res.status_code != 200:
+        print("url not 200.")
+        return None
+
+    soup = BeautifulSoup(res.content, "html.parser")
+    expressway_table = soup.select_one("table.wikitable.collapsible")
+    expressway_rows = expressway_table.find_all("tr")[1:]
+
+    expressway_limits = {}
+    for row in expressway_rows:
+        cells = row.find_all(['td', 'th'])
+
+        if len(cells) >= 3:
+            name_cell = cells[0]
+            name_link = name_cell.find('a', title=True)
+            expressway_name = name_link.get_text(strip=True) if name_link else name_cell.get_text(strip=True)
+            speed_text = cells[2].get_text(strip=True)
+            numbers = re.findall(r'\d+', speed_text)
+            if numbers:
+                if len(numbers) == 1:
+                    speed_limit = float(numbers[0])
+                else:
+                    speed_limit = float(max(numbers))
+
+                expressway_limits[expressway_name] = speed_limit
+
+    return expressway_limits
+
 def main():
     USER_HEADERS = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
@@ -465,7 +467,8 @@ def main():
     gov_gdf_path: str = get_latest_road_network(dataset_fp)
     gov_gdf = get_all_gdf_data(gov_gdf_path, "CENTERLINE")
     print('got gdf data for gov gdb')
-    OSM_GDF(gdf_data, gm_api_key, USER_HEADERS, gov_gdf)
+    expressway_limits = get_expressway_limits()
+    OSM_GDF(gdf_data, gm_api_key, USER_HEADERS, gov_gdf, expressway_limits)
 
     # address look up
     # start_address: str = "2 lung pak street"
