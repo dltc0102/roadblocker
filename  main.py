@@ -13,6 +13,18 @@ from colorama import Style as CStyle
 import haversine.haversine as haversine
 from tqdm import tqdm
 
+start_time = time.time()
+def timer_decorator(start_time):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            result = func(*args, **kwargs)
+            elapsed = time.time() - start_time
+            print(f"Time elapsed: {elapsed:.4f}s")
+            return result
+        return wrapper
+    return decorator
+
+
 # remove weird pyogrio warnings
 warnings.filterwarnings(
     "ignore",
@@ -25,6 +37,7 @@ warnings.filterwarnings(
 """----------
     UTILS
 ----------"""
+@timer_decorator(start_time)
 def remove_filepath(filepath: str) -> None:
     if os.path.exists(filepath):
         if os.path.isfile(filepath):
@@ -47,6 +60,7 @@ def color_msg(color, msg):
     }
     return f"{colors[color.lower()]}{msg}{CStyle.RESET_ALL}"
 
+@timer_decorator(start_time)
 def get_gm_api_key() -> str:
     with open("apikey.txt", 'r', encoding='utf-8') as key_f:
         print("GM Api Key Received.")
@@ -56,6 +70,7 @@ def get_gm_api_key() -> str:
 """-------------------
    COORDINATE STUFF
 -------------------"""
+@timer_decorator(start_time)
 def osm_address_lookup(request_address: str) -> json:
     NOMINATIM_HEADERS = {
         "User-Agent": "Roadblocker/1.0 (daniellautc@gmail.com)"
@@ -135,6 +150,7 @@ def get_coordinate_details(start_details: dict, end_details: dict):
 ----------"""
 warnings.filterwarnings("ignore", message="Non closed ring detected", category=RuntimeWarning, module="pyogrio.raw")
 
+@timer_decorator(start_time)
 def get_pbf_filepath() -> str:
     file_to_parse = None
     for filepath in os.listdir(os.getcwd()):
@@ -143,6 +159,7 @@ def get_pbf_filepath() -> str:
     print("Found PBF file to parse.")
     return file_to_parse
 
+@timer_decorator(start_time)
 def get_all_gdf_data(filepath: str, specified_layer=None) -> gpd.geodataframe.GeoDataFrame:
     if os.path.isdir(filepath):
         if specified_layer is not None:
@@ -200,51 +217,49 @@ class OSM_GDF:
         for node in tqdm(self.lines_nodes, desc="Processing node data"):
             self.lines_nodes_data.append(node.get_node_data())
 
-        line_nodes_fp = "line_nodes.txt"
+        line_nodes_fp = "line_nodes.json"
         remove_filepath(line_nodes_fp)
 
         with open(line_nodes_fp, 'w', encoding='utf-8') as lnfp:
             for line_node in tqdm(self.lines_nodes_data, desc="Writing to file"):
-                for k, v in line_node.items():
-                    lnfp.write(f"{k}: {v}")
-                lnfp.write("\n")
-        print('lines_nodes.txt has been written')
+                json.dump(line_node, lnfp, ensure_ascii=False, indent=2)
+        print('lines_nodes.json has been written')
 
-    def gm_reverse_lookup(self, coord_tuple: tuple[float, float]) -> json:
-        gmaps = googlemaps.Client(key=self.api_key)
-        lat, lon = coord_tuple
-        reverse_geocode_result = gmaps.reverse_geocode((lat, lon))
-        if not reverse_geocode_result:
-            return "No results found for these coordinates."
-        return reverse_geocode_result
+    # def gm_reverse_lookup(self, coord_tuple: tuple[float, float]) -> json:
+    #     gmaps = googlemaps.Client(key=self.api_key)
+    #     lat, lon = coord_tuple
+    #     reverse_geocode_result = gmaps.reverse_geocode((lat, lon))
+    #     if not reverse_geocode_result:
+    #         return "No results found for these coordinates."
+    #     return reverse_geocode_result
 
-    def get_elevation(self, coords_tuple: tuple[float, float]) -> float:
-        lat, lon = coords_tuple
-        format_lat: float = round(lat, 5)
-        format_lon: float = round(lon, 5)
-        format_coords = f"{format_lat}, {format_lon}"
-        params = {
-            'locations': format_coords,
-            'key': self.api_key
-        }
-        url = "https://maps.googleapis.com/maps/api/elevation/json"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
-            'Accept': 'application/json, text/plain, */*',
-        }
-        res = requests.get(url=url, headers=headers, params=params)
+    # def get_elevation(self, coords_tuple: tuple[float, float]) -> float:
+    #     lat, lon = coords_tuple
+    #     format_lat: float = round(lat, 5)
+    #     format_lon: float = round(lon, 5)
+    #     format_coords = f"{format_lat}, {format_lon}"
+    #     params = {
+    #         'locations': format_coords,
+    #         'key': self.api_key
+    #     }
+    #     url = "https://maps.googleapis.com/maps/api/elevation/json"
+    #     headers = {
+    #         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+    #         'Accept': 'application/json, text/plain, */*',
+    #     }
+    #     res = requests.get(url=url, headers=headers, params=params)
 
-        if res.status_code != 200:
-            res.raise_for_status()
-            return
+    #     if res.status_code != 200:
+    #         res.raise_for_status()
+    #         return
 
-        result = res.json()
-        elevation = result['results'][0]['elevation']
-        return elevation
+    #     result = res.json()
+    #     elevation = result['results'][0]['elevation']
+    #     return elevation
 
-    def _is_text_chinese(self, text: str) -> bool:
-        chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
-        return bool(chinese_pattern.search(text))
+    # def _is_text_chinese(self, text: str) -> bool:
+    #     chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
+    #     return bool(chinese_pattern.search(text))
 
 class OSM_LineNode:
     def __init__(self, api_key, headers, gov_gdf, expressway_limits, osm_id: int, name: str, highway: str, waterway: str, aerialway: str, barrier: str, man_made: str, railway: str, z_order: int, other_tags, geometry):
@@ -292,12 +307,6 @@ class OSM_LineNode:
         else:
             self.avespeed = self.maxspeed * 0.9
 
-        # if self.coord_lst != []:
-        #     self.first_coords = self.coord_lst[0]
-        #     self.last_coords = self.coord_lst[-1]
-        #     self.line_distance_km = haversine(self.first_coords, self.last_coords)
-            # self._print()
-
         if self.first_coords == self.last_coords:
             self.line_distance_km = self.query_gov_gdf(self.name)
 
@@ -331,10 +340,9 @@ class OSM_LineNode:
                 return float(h_dis)
 
     def get_expressway_speed(self):
-        expressway_limits: dict = self.get_expressway_limits()
-        if self.en_name not in expressway_limits:
+        if self.en_name not in self.expressway_limits:
             return 50.0
-        return expressway_limits[self.en_name]
+        return self.expressway_limits[self.en_name]
 
     def get_other_tags_dict(self) -> dict:
         tag_content = self.other_tags.strip()
@@ -371,7 +379,6 @@ class OSM_LineNode:
             "is_oneway": self.is_oneway,
             "is_street": self.is_street,
             "z_order": self.z_order,
-            "geometry": self.geometry,
             "coords_lst": self.coord_lst,
             "first_coords": self.first_coords,
             "last_coords": self.last_coords,
@@ -397,6 +404,7 @@ class OSM_LineNode:
 """----------
    GOV GDF
 ----------"""
+@timer_decorator(start_time)
 def get_latest_road_network(dataset_filepath: str) -> str:
     filename = "RdNet_IRNP.gdb"
     gdb_filepath = os.path.join(dataset_filepath, filename)
@@ -418,9 +426,10 @@ def get_latest_road_network(dataset_filepath: str) -> str:
     print("Road network dataset downloaded and extracted.")
     return gdb_filepath
 
-def get_expressway_limits(self) -> dict | None:
+@timer_decorator(start_time)
+def get_expressway_limits(headers: dict) -> dict | None:
     url = "https://en.wikipedia.org/wiki/List_of_streets_and_roads_in_Hong_Kong"
-    res = requests.get(url, headers=self.headers)
+    res = requests.get(url, headers=headers)
     res.raise_for_status()
     if res.status_code != 200:
         print("url not 200.")
@@ -467,12 +476,16 @@ def main():
     gov_gdf_path: str = get_latest_road_network(dataset_fp)
     gov_gdf = get_all_gdf_data(gov_gdf_path, "CENTERLINE")
     print('got gdf data for gov gdb')
-    expressway_limits = get_expressway_limits()
+    expressway_limits = get_expressway_limits(USER_HEADERS)
+    print()
+    print("-----")
     OSM_GDF(gdf_data, gm_api_key, USER_HEADERS, gov_gdf, expressway_limits)
 
+    # dev
+
     # address look up
-    # start_address: str = "2 lung pak street"
-    # end_address: str = "89 pok fu lam road"
+    start_address: str = "2 lung pak street"
+    end_address: str = "89 pok fu lam road"
     # osm_start_options: json = osm_address_lookup(request_address=start_address)
     # osm_end_options: json = osm_address_lookup(request_address=end_address)
     # osm_start: dict = get_chosen_option(osm_start_options)
