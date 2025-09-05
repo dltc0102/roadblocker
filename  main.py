@@ -47,7 +47,7 @@ def remove_filepath(filepath: str) -> None:
             shutil.rmtree(filepath)
             print(f"Removed directory '{filepath}'.")
 
-def color_msg(color, msg):
+def color_msg(color: str, msg: str) -> str:
     colors = {
         'red': CFore.RED,
         'blue': CFore.BLUE,
@@ -153,9 +153,10 @@ warnings.filterwarnings("ignore", message="Non closed ring detected", category=R
 @timer_decorator(start_time)
 def get_pbf_filepath() -> str:
     file_to_parse = None
-    for filepath in os.listdir(os.getcwd()):
+    dataset_dirpath = os.path.join(os.getcwd(), 'dataset')
+    for filepath in os.listdir(dataset_dirpath):
         if filepath.startswith('hong-kong') and filepath.endswith('.pbf'):
-            file_to_parse = os.path.join(os.getcwd(), filepath)
+            file_to_parse = os.path.join(dataset_dirpath, filepath)
     print("Found PBF file to parse.")
     return file_to_parse
 
@@ -184,47 +185,79 @@ def get_all_gdf_data(filepath: str, specified_layer=None) -> gpd.geodataframe.Ge
     print(f"All GDF data extracted. {len(layers)} layers found.")
     return gdf_data
 
+class cKDTree:
+    def __init__(self, osm_gdf, api_key, headers, gov_gdf, top_n):
+        self.osm_gdf = osm_gdf
+        self.gov_gdf = gov_gdf
+        self.api_key = api_key
+        self.headers = headers
+        self.top_n = top_n
+
+        self.tree = None
+        self.fastest_routes = []
+
+        if osm_gdf:
+            self.tree = self.build_tree()
+            
+
+        # if self.tree:
+        #     self.fastest_routes = self.find_fastest_routes()
+
+
+    def build_tree(self):
+        self.line_way_nodes: list[dict] = self.osm_gdf.get_line_nodes_ways()
+        return
+
+    def find_fastest_routes(self) -> list:
+        # raise NotImplementedError("find_fastest_routes func() not implemented")
+        return
+
+    def astar_algorithm(self) -> list:
+        # raise NotImplementedError("astar_algorithm func() not implemented")
+        return
+
 class OSM_GDF:
-    def __init__(self, gdf_data, api_key, headers, gov_gdf, expressway_limits):
+    def __init__(self, gdf_data, api_key, headers, gov_gdf, expressway_limits, start_time):
         self.gdf_data = gdf_data
         self.api_key = api_key
         self.headers = headers
         self.gov_gdf = gov_gdf
         self.expressway_limits = expressway_limits
+        self.start_time = start_time
+        self.crs_transformer = Transformer.from_crs("EPSG:2326", "EPSG:4326", always_xy=True)
 
-        self.points_gdf = gdf_data['points']
+        # self.points_gdf = gdf_data['points']
         self.lines_gdf = gdf_data["lines"]
-        self.mls_gdf = gdf_data["multilinestrings"]
-        self.mpg_gdf = gdf_data["multipolygons"]
-        self.other_gdf = gdf_data["other_relations"]
+        # self.mls_gdf = gdf_data["multilinestrings"]
+        # self.mpg_gdf = gdf_data["multipolygons"]
+        # self.other_gdf = gdf_data["other_relations"]
 
         self.lines_nodes = []
-        self.lines_nodes_data = []
+        self.lines_nodes_ways = []
         if not self.lines_gdf.empty:
-            print("Creating Line Nodes...")
-            for idx, line in tqdm(self.lines_gdf.iterrows(), total=len(self.lines_gdf), desc="Creating line nodes"):
-                if line["name"] != None:
-                    self.lines_nodes.append(
-                        OSM_LineNode(
-                            self.api_key, self.headers, self.gov_gdf, self.expressway_limits, line["osm_id"], line["name"], line["highway"], line["waterway"], line["aerialway"], line["barrier"], line["man_made"], line["railway"], line["z_order"], line["other_tags"], line["geometry"]
-                        )
-                    )
-            print("All Line Nodes Created.")
-        print(f"# of line nodes {len(self.lines_nodes)}")
+            self.create_line_nodes()
 
-        print(len([node for node in self.lines_nodes if node.name == None]))
+        print(f"# of line nodes {len(self.lines_nodes)}\n")
 
-        for node in tqdm(self.lines_nodes, desc="Processing node data"):
-            self.lines_nodes_data.append(node.get_node_data())
+    @timer_decorator(start_time)
+    def create_line_nodes(self):
+        print("Creating Line Nodes...")
+        for idx, line in tqdm(self.lines_gdf.iterrows(), total=len(self.lines_gdf), desc="Creating line nodes"):
+            if line["name"] is not None:
+                line_node = OSM_LineNode(
+                    self.api_key, self.headers, self.gov_gdf, self.expressway_limits, self.crs_transformer, line["osm_id"], line["name"], line["highway"], line["waterway"], line["aerialway"], line["barrier"], line["man_made"], line["railway"], line["z_order"], line["other_tags"], line["geometry"]
+                )
+                self.lines_nodes.append(line_node.get_node_data())
+                self.lines_nodes_ways.append(line_node.get_way_data())
+        print("All Line Nodes Created.")
 
-        line_nodes_fp = "line_nodes.json"
-        remove_filepath(line_nodes_fp)
+    def get_line_nodes_ways(self) -> list:
+        """ returns a list of tuple(first_coord, last_coord) of each line_node """
+        return self.lines_nodes_ways
 
-        with open(line_nodes_fp, 'w', encoding='utf-8') as lnfp:
-            for line_node in tqdm(self.lines_nodes_data, desc="Writing to file"):
-                json.dump(line_node, lnfp, ensure_ascii=False, indent=2)
-        print('lines_nodes.json has been written')
-
+    def get_line_nodes(self) -> list:
+        """ Returns a list of line_nodes"""
+        return self.lines_nodes
     # def gm_reverse_lookup(self, coord_tuple: tuple[float, float]) -> json:
     #     gmaps = googlemaps.Client(key=self.api_key)
     #     lat, lon = coord_tuple
@@ -262,11 +295,12 @@ class OSM_GDF:
     #     return bool(chinese_pattern.search(text))
 
 class OSM_LineNode:
-    def __init__(self, api_key, headers, gov_gdf, expressway_limits, osm_id: int, name: str, highway: str, waterway: str, aerialway: str, barrier: str, man_made: str, railway: str, z_order: int, other_tags, geometry):
+    def __init__(self, api_key, headers, gov_gdf, expressway_limits, crs_transformer, osm_id: int, name: str, highway: str, waterway: str, aerialway: str, barrier: str, man_made: str, railway: str, z_order: int, other_tags, geometry):
         self.api_key = api_key
         self.headers = headers
         self.gov_gdf = gov_gdf
         self.expressway_limits = expressway_limits
+        self.crs_transformer = crs_transformer
 
         self.osm_id = osm_id
         self.name = name
@@ -307,44 +341,47 @@ class OSM_LineNode:
         else:
             self.avespeed = self.maxspeed * 0.9
 
-        if self.first_coords == self.last_coords:
+        while self.first_coords == self.last_coords:
             self.line_distance_km = self.query_gov_gdf(self.name)
 
-        if self.avespeed != 0.0 and self.line_distance_km != None:
+        if self.avespeed != 0.0 and self.line_distance_km is not None:
             self.weight = self.line_distance_km / self.avespeed
 
     def convert_mls(self, giv_geometry) -> list[tuple[float, float]]:
+        """ Converts a MultiLineString of EPSG:2326 Coordinates into a list of coordinates in WGS84 Format """
         if isinstance(giv_geometry, MultiLineString):
-            crs_transformer = Transformer.from_crs("EPSG:2326", "EPSG:4326", always_xy=True)
             all_coords = []
             for line_string in giv_geometry.geoms:
                 for coord in line_string.coords:
                     eing, ning = coord
                     if eing is not None and ning is not None:
-                        lon, lat = crs_transformer.transform(eing, ning)
+                        lon, lat = self.crs_transformer.transform(eing, ning)
                         all_coords.append((lat, lon))
             return all_coords
 
     def query_gov_gdf(self, address: str) -> float:
+        """ Find street in government data and return its length in km. """
         for idx, street in self.gov_gdf.iterrows():
             street_ename = street["STREET_ENAME"]
             if street_ename and address.lower() in street_ename.lower():
                 shape_length = street["SHAPE_Length"]
-                if shape_length != None:
+                if shape_length is not None:
                     return float(shape_length / 1000)
 
-                converted_coords = self.convert_mls(street["geometry"])
-                first_coords = converted_coords[0]
-                last_coords = converted_coords[-1]
-                h_dis = haversine(first_coords, last_coords)
+                self.coord_lst = self.convert_mls(street["geometry"])
+                self.first_coords = self.coord_lst[0]
+                self.last_coords = self.coord_lst[-1]
+                h_dis = haversine(self.first_coords, self.last_coords)
                 return float(h_dis)
 
-    def get_expressway_speed(self):
+    def get_expressway_speed(self) -> float:
+        """ Gets speed limit based on whether street's english name is in self.expressway_limits or not. """
         if self.en_name not in self.expressway_limits:
             return 50.0
         return self.expressway_limits[self.en_name]
 
     def get_other_tags_dict(self) -> dict:
+        """ Parses the other_tags attribute into a dictionary for ease of access. """
         tag_content = self.other_tags.strip()
         tag_content = re.sub(r'\s+', ' ', tag_content)
         tag_dict = '{' + tag_content.replace('=>', ':') + '}'
@@ -392,7 +429,12 @@ class OSM_LineNode:
 
         # print(f"{self.name} {self.first_coords} { self.last_coords} [{self.line_distance_km}]")
 
+    def get_way_data(self) -> dict:
+        """ Returns way data: {en_name: {first: first_coords, last: last_coords, weight: weight}} """
+        return {self.en_name: {'first': self.first_coords, 'last': self.last_coords, 'weight': self.weight}}
+
     def get_coords(self) -> list[tuple[float, float]]:
+        """ Takes geometry and converts it into a list of coordinates. (assumes geometry is already in wgs84 format) """
         coords = []
         for coord in self.geometry.coords:
             lon, lat = coord
@@ -401,7 +443,7 @@ class OSM_LineNode:
         return coords
 
 
-"""----------
+"""----------""
    GOV GDF
 ----------"""
 @timer_decorator(start_time)
@@ -468,6 +510,7 @@ def main():
         'Connection': 'keep-alive',
     }
     gm_api_key: str = get_gm_api_key()
+    output_fp: str = os.path.join(os.getcwd(), 'output')
     pbf_file_path: str = get_pbf_filepath()
     gdf_data = get_all_gdf_data(pbf_file_path)
     print("got gdf data for pbf file")
@@ -479,7 +522,9 @@ def main():
     expressway_limits = get_expressway_limits(USER_HEADERS)
     print()
     print("-----")
-    OSM_GDF(gdf_data, gm_api_key, USER_HEADERS, gov_gdf, expressway_limits)
+    osm_gdf = OSM_GDF(gdf_data, gm_api_key, USER_HEADERS, gov_gdf, expressway_limits, start_time)
+    line_nodes_ckdtree = cKDTree(osm_gdf, gm_api_key, USER_HEADERS, gov_gdf, top_n=5)
+
 
     # dev
 
