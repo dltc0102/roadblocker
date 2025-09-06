@@ -6,11 +6,11 @@ from shapely.geometry import MultiLineString
 from pyproj import Transformer
 from bs4 import BeautifulSoup
 import geopandas as gpd
-from scipy.spatial import cKDTree
+from scipy.spatial import KDTree
 import numpy as np
 from colorama import Fore as CFore
 from colorama import Style as CStyle
-import haversine.haversine as haversine
+import haversine.haversine as haversine_calc
 from tqdm import tqdm
 
 start_time = time.time()
@@ -23,7 +23,6 @@ def timer_decorator(start_time):
             return result
         return wrapper
     return decorator
-
 
 # remove weird pyogrio warnings
 warnings.filterwarnings(
@@ -185,36 +184,7 @@ def get_all_gdf_data(filepath: str, specified_layer=None) -> gpd.geodataframe.Ge
     print(f"All GDF data extracted. {len(layers)} layers found.")
     return gdf_data
 
-class cKDTree:
-    def __init__(self, osm_gdf, api_key, headers, gov_gdf, top_n):
-        self.osm_gdf = osm_gdf
-        self.gov_gdf = gov_gdf
-        self.api_key = api_key
-        self.headers = headers
-        self.top_n = top_n
 
-        self.tree = None
-        self.fastest_routes = []
-
-        if osm_gdf:
-            self.tree = self.build_tree()
-            
-
-        # if self.tree:
-        #     self.fastest_routes = self.find_fastest_routes()
-
-
-    def build_tree(self):
-        self.line_way_nodes: list[dict] = self.osm_gdf.get_line_nodes_ways()
-        return
-
-    def find_fastest_routes(self) -> list:
-        # raise NotImplementedError("find_fastest_routes func() not implemented")
-        return
-
-    def astar_algorithm(self) -> list:
-        # raise NotImplementedError("astar_algorithm func() not implemented")
-        return
 
 class OSM_GDF:
     def __init__(self, gdf_data, api_key, headers, gov_gdf, expressway_limits, start_time):
@@ -249,50 +219,29 @@ class OSM_GDF:
                 )
                 self.lines_nodes.append(line_node.get_node_data())
                 self.lines_nodes_ways.append(line_node.get_way_data())
+            if idx == 51:
+                break
         print("All Line Nodes Created.")
 
     def get_line_nodes_ways(self) -> list:
         """ returns a list of tuple(first_coord, last_coord) of each line_node """
-        return self.lines_nodes_ways
+        restructed_dict = {}
+        for way_data in self.lines_nodes_ways:
+            for way_key, way_value in way_data.items():
+                street_name = way_key
+                first_coords = way_value['first']
+                last_coords = way_value['last']
+                weight = way_value['weight']
+                restructed_dict[first_coords] = {
+                    'last': last_coords,
+                    'name': street_name,
+                    'weight': weight
+                }
+        return restructed_dict
 
     def get_line_nodes(self) -> list:
         """ Returns a list of line_nodes"""
         return self.lines_nodes
-    # def gm_reverse_lookup(self, coord_tuple: tuple[float, float]) -> json:
-    #     gmaps = googlemaps.Client(key=self.api_key)
-    #     lat, lon = coord_tuple
-    #     reverse_geocode_result = gmaps.reverse_geocode((lat, lon))
-    #     if not reverse_geocode_result:
-    #         return "No results found for these coordinates."
-    #     return reverse_geocode_result
-
-    # def get_elevation(self, coords_tuple: tuple[float, float]) -> float:
-    #     lat, lon = coords_tuple
-    #     format_lat: float = round(lat, 5)
-    #     format_lon: float = round(lon, 5)
-    #     format_coords = f"{format_lat}, {format_lon}"
-    #     params = {
-    #         'locations': format_coords,
-    #         'key': self.api_key
-    #     }
-    #     url = "https://maps.googleapis.com/maps/api/elevation/json"
-    #     headers = {
-    #         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
-    #         'Accept': 'application/json, text/plain, */*',
-    #     }
-    #     res = requests.get(url=url, headers=headers, params=params)
-
-    #     if res.status_code != 200:
-    #         res.raise_for_status()
-    #         return
-
-    #     result = res.json()
-    #     elevation = result['results'][0]['elevation']
-    #     return elevation
-
-    # def _is_text_chinese(self, text: str) -> bool:
-    #     chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
-    #     return bool(chinese_pattern.search(text))
 
 class OSM_LineNode:
     def __init__(self, api_key, headers, gov_gdf, expressway_limits, crs_transformer, osm_id: int, name: str, highway: str, waterway: str, aerialway: str, barrier: str, man_made: str, railway: str, z_order: int, other_tags, geometry):
@@ -501,6 +450,83 @@ def get_expressway_limits(headers: dict) -> dict | None:
 
     return expressway_limits
 
+class RB_KDTree:
+    def __init__(self, gm_api_key, gov_gdf, osm_gdf, top_n):
+        self.gm_api_key: str = gm_api_key
+        self.gov_gdf: gpd.geodataframe.GeoDataFrame = gov_gdf
+        self.osm_gdf: OSM_GDF = osm_gdf
+        self.top_n = top_n # also k
+
+        self.node_data: dict[dict] = self.osm_gdf.get_line_nodes_ways()
+        self.start_points: list = list(self.node_data.keys())
+        self.kdtree: KDTree = KDTree(self.start_points)
+
+    def get_heuristic(self, query_point: np.array, target_point: np.array):
+        query_lat, query_lon = float(query_point[0]), float(query_point[1])
+        try:
+            queried_data = self.node_data[(query_lat, query_lon)]
+        except KeyError:
+            # need to get query point data for street ename, first coords, last coords, weight
+            new_data = self.query_gov_gdf(query_point)
+
+        end_point = queried_data["last"]
+        h_dist = haversine_calc(end_point, target_point)
+        heuristic = h_dist / 110.0 # 110 is max speed possible in hk
+        return heuristic
+
+    def get_k_neighbors(self, query_point) -> list:
+        radius = 1.0
+        distances, indices = self.kdtree.query(query_point, self.top_n, distance_upper_bound=radius)
+        neighbors = []
+        for idx, dist in enumerate(zip(distances, indices)):
+            if dist <= radius and not np.isinf(dist):
+                neighbors.append((self.start_points[indices[idx]], dist))
+        return neighbors
+
+    def find_path(self, start_point: tuple[float, float], target_point: tuple[float, float]) -> float | None:
+        start_np = np.array(start_point)
+        target_np = np.array(target_point)
+        max_search_radius: float = 2.0
+        open_set = [(self.get_heuristic(start_np, target_np), tuple(start_np, 0), 0, [tuple(start_np)])]
+        closed_set = set()
+        g_scores = {tuple(start_np): 0}
+        f_scores = {tuple(start_np): self.get_heuristic(start_np, target_np)}
+
+        while open_set:
+            curr_f, curr, curr_g, curr_path = heapq.heappop(open_set)
+            curr_np = np.array(curr)
+
+            if tuple(curr_np) in closed_set:
+                continue
+
+            closed_set.add(tuple(curr_np))
+
+            if np.allclose(curr_np, target_np, atol=0.1):
+                return curr_path, curr_g
+
+            neighbors = self.get_k_neighbors(curr_np, max_search_radius)
+
+            for neighbor, distance in neighbors:
+                neighbor_tuple = tuple(neighbor)
+
+                if neighbor_tuple in closed_set:
+                    continue
+
+                tentative_g = curr_g + distance
+
+                if (neighbor_tuple not in g_scores or
+                    tentative_g < g_scores[neighbor_tuple]):
+
+                    g_scores[neighbor_tuple] = tentative_g
+                    f_score = tentative_g + self.get_heuristic(neighbor, target_np)
+                    f_scores[neighbor_tuple] = f_score
+
+                    new_path = curr_path + [neighbor_tuple]
+                    heapq.heappush(open_set, (f_score, neighbor_tuple, tentative_g, new_path))
+
+        return None, float('inf')
+
+
 def main():
     USER_HEADERS = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
@@ -509,21 +535,24 @@ def main():
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
     }
-    gm_api_key: str = get_gm_api_key()
-    output_fp: str = os.path.join(os.getcwd(), 'output')
-    pbf_file_path: str = get_pbf_filepath()
-    gdf_data = get_all_gdf_data(pbf_file_path)
+    gm_api_key          : str = get_gm_api_key()
+    output_fp           : str = os.path.join(os.getcwd(), 'output')
+    pbf_file_path       : str = get_pbf_filepath()
+    gdf_data            : gpd.geodataframe.GeoDataFrame = get_all_gdf_data(pbf_file_path)
     print("got gdf data for pbf file")
 
-    dataset_fp: str = os.path.join(os.getcwd(), 'dataset')
-    gov_gdf_path: str = get_latest_road_network(dataset_fp)
-    gov_gdf = get_all_gdf_data(gov_gdf_path, "CENTERLINE")
+    dataset_fp          : str = os.path.join(os.getcwd(), 'dataset')
+    gov_gdf_path        : str = get_latest_road_network(dataset_fp)
+    gov_gdf             : gpd.geodataframe.GeoDataFrame = get_all_gdf_data(gov_gdf_path, "CENTERLINE")
     print('got gdf data for gov gdb')
-    expressway_limits = get_expressway_limits(USER_HEADERS)
+
+    expressway_limits   : dict = get_expressway_limits(USER_HEADERS)
+
     print()
     print("-----")
-    osm_gdf = OSM_GDF(gdf_data, gm_api_key, USER_HEADERS, gov_gdf, expressway_limits, start_time)
-    line_nodes_ckdtree = cKDTree(osm_gdf, gm_api_key, USER_HEADERS, gov_gdf, top_n=5)
+
+    osm_gdf             : OSM_GDF = OSM_GDF(gdf_data, gm_api_key, USER_HEADERS, gov_gdf, expressway_limits, start_time)
+    rb_kdtree           : KDTree = RB_KDTree(gm_api_key, gov_gdf, osm_gdf, 5)
 
 
     # dev

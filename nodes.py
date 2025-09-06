@@ -4,7 +4,7 @@ from shapely.geometry import MultiLineString
 from pyproj import Transformer
 from bs4 import BeautifulSoup
 import geopandas as gpd
-from scipy.spatial import cKDTree
+from scipy.spatial import KDTree
 import numpy as np
 from colorama import Fore as CFore
 from colorama import Style as CStyle
@@ -27,60 +27,80 @@ def get_gm_api_key() -> str:
         print("GM Api Key Received.")
         return key_f.readline().strip()
 
-class node_cKDTree:
-    def __init__(self, nodes_data, api_key, headers, top_n):
-        self.nodes_data = nodes_data
-        self.api_key            : str = api_key
-        self.headers            : dict = headers
-        self.top_n              : int = top_n
-        self.start_point        : float[tuple, tuple] = (22.363929920293774, 114.17929436609448)
-        self.target_point       : float[tuple, tuple] = (22.284566183373638, 114.13251488622221)
+class AlgoKDTree:
+    def __init__(self, gov_gdf, start_coords_lst: list, node_data: dict, k: int):
+        self.gov_gdf            : gpd.geodataframe.GeoDataFrame = gov_gdf
+        self.start_coords_lst   : list = start_coords_lst
+        self.kdtree             : KDTree = KDTree(start_coords_lst)
+        self.node_data          : dict = node_data
+        self.k                  : int = k
 
-        self.way_info           : list = []
-        self.midpoints          : list = []
-        self.midpoints_array    : np.array = np.array([])
-        self.kdtree             : cKDTree = None
-        self.fastest_routes     : list = []
+        if self.node_data:
+            print(len(self.node_data.keys()))
 
-        if self.nodes_data:
-            self.midpoints_array: np.array = self.get_midpoints()
+    def get_heuristic(self, query_point: np.array, target_point: np.array) -> float:
+        query_lat, query_lon = tuple((float(thing) for thing in query_point))
+        try:
+            queried_data = self.node_data[(query_lat, query_lon)]
+        except KeyError:
+            new_data = self.query_gov_gdf(query_point)
 
-        if self.midpoints_array.size > 0:
-            self.kdtree: cKDTree = self.build_tree()
+        end_point = queried_data["last"]
+        h_dist = haversine_calc(end_point, target_point)
+        heuristic = h_dist / 110.0
+        print(heuristic, queried_data["weight"])
+        return heuristic
 
-        # run find_fastest_routes()
-            # use astar_algorithm()
-            # use find_k_nearest_neighbors()
+    def get_k_neighbors(self, query_point: tuple[float, float], radius=1.0) -> list:
+        distances, indices = self.kdtree.query(query_point, k=self.k, distance_upper_bound=radius)
+        neighbors = []
+        for i, dist in enumerate(zip(distances, indices)):
+            if dist <= radius and not np.isinf(dist):
+                neighbors.append((self.points[indices[i]], dist))
+        return neighbors
 
-    def get_midpoints(self):
-        self.way_info = []
-        self.midpoints = []
-        for way in self.nodes_data:
-            for way_name, way_data in way.items():
-                first_lat, first_lon = way_data["first"]
-                last_lat, last_lon = way_data["last"]
-                mid_lat = (first_lat + last_lat) / 2
-                mid_lon = (first_lon + last_lon) / 2
-                self.midpoints.append([mid_lat, mid_lon])
-                self.way_info.append((way_name, way_data))
-        return np.array(self.midpoints)
+    def find_path(self, start_point: tuple[float, float], target_point: tuple[float, float]) -> float | None:
+        start_np = np.array(start_point)
+        target_np = np.array(target_point)
+        max_search_radius: float = 2.0
+        open_set = [(self.get_heuristic(start_np, target_np), tuple(start_np, 0), 0, [tuple(start_np)])]
+        closed_set = set()
+        g_scores = {tuple(start_np): 0}
+        f_scores = {tuple(start_np): self.get_heuristic(start_np, target_np)}
 
-    def build_tree(self):
-        return cKDTree(self.midpoints_array)
+        while open_set:
+            curr_f, curr, curr_g, curr_path = heapq.heappop(open_set)
+            curr_np = np.array(curr)
 
-    def find_k_nearest_neighbors(self):
-        distances, indices = self.kdtree.query(self.query_point, self.top_n)
-        for i, (distance, index) in enumerate(zip(distances, indices)):
-            way_name, way_data = self.way_info[index]
-            print(f"{i+1}. {way_name} - Distance: {distance:.6f} km")
+            if tuple(curr_np) in closed_set:
+                continue
 
-    def find_fastest_routes(self) -> list:
-        self.astar_algorithm()
-        return
+            closed_set.add(tuple(curr_np))
 
-    def astar_algorithm(self) -> list:
-        self.find_k_nearest_neighbors()
-        return
+            if np.allclose(curr_np, target_np, atol=0.1):
+                return curr_path, curr_g
+
+            neighbors = self.get_k_neighbors(curr_np, max_search_radius)
+
+            for neighbor, distance in neighbors:
+                neighbor_tuple = tuple(neighbor)
+
+                if neighbor_tuple in closed_set:
+                    continue
+
+                tentative_g = curr_g + distance
+
+                if (neighbor_tuple not in g_scores or
+                    tentative_g < g_scores[neighbor_tuple]):
+
+                    g_scores[neighbor_tuple] = tentative_g
+                    f_score = tentative_g + self.get_heuristic(neighbor, target_np)
+                    f_scores[neighbor_tuple] = f_score
+
+                    new_path = curr_path + [neighbor_tuple]
+                    heapq.heappush(open_set, (f_score, neighbor_tuple, tentative_g, new_path))
+
+        return None, float('inf')
 
 def main():
     USER_HEADERS = {
@@ -92,8 +112,33 @@ def main():
     }
     gm_api_key: str = get_gm_api_key()
     nodes_json_fp: str = get_nodes_json_fp()
-    nodes_data = read_json_file(nodes_json_fp)
-    node_cKDTree(nodes_data, gm_api_key, USER_HEADERS, top_n=5)
+    nodes_data_lst = read_json_file(nodes_json_fp)
+    # node_cKDTree(nodes_data, gm_api_key, USER_HEADERS, top_n=5)
+
+    start_point = (22.2822603, 114.1258876)
+    start_np = np.array(start_point)
+    target_point = (22.284566183373638, 114.13251488622221)
+    target_np = np.array(target_point)
+
+    nodes_data_dict = {}
+    for node_data in nodes_data_lst:
+        for key, value in node_data.items():
+            first_lat, first_lon = value['first']
+            last_lat, last_lon = value['last']
+            weight = value['weight']
+            nodes_data_dict[(first_lat, first_lon)] = {
+                'last': (last_lat, last_lon),
+                'weight': weight,
+                'name': key
+            }
+    start_coords_lst = list(nodes_data_dict.keys())
+    gov_gdf = {}
+    algo_kdtree = AlgoKDTree(gov_gdf, start_coords_lst, nodes_data_dict, k=5)
+    check = algo_kdtree.get_heuristic(start_np, target_np)
+    # found_path = algo_kdtree.find_path(start_point, target_point)
+    # print(found_path)
+
+
 
 if __name__ == "__main__":
     main()
